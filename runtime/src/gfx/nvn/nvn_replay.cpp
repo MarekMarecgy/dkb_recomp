@@ -2204,6 +2204,24 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
         g_trigger_seen = true;
         g_trigger_present = static_cast<int64_t>(counters().presents.load());
     }
+    {   // [nvn] trace_fs = "HASH ...": the first three draws with each listed fragment shader (hash prefix) are traced in any frame
+        static const std::vector<std::string> list = [] {
+            std::vector<std::string> v;
+            std::istringstream in(nxrt::config_get_str("nvn", "trace_fs", ""));
+            for (std::string w; in >> w;) v.push_back(w);
+            return v;
+        }();
+        static std::unordered_map<std::string, int> seen;
+        static bool on = false, saved = false;
+        if (on) { g_trace = saved; on = false; }
+        if (!list.empty() && S.stage[kFragment])
+            for (const std::string& p : list)
+                if (S.stage[kFragment]->hash.compare(0, p.size(), p) == 0 && seen[p]++ < 3) {
+                    saved = g_trace; on = true; g_trace = true;
+                    g_dirty |= kDesc;   // so the binding trace below runs for this draw
+                    break;
+                }
+    }
     const ProgLayout* pl = g_pl;
     if (!pl) return false;
     if (extras::temporal_wanted()) temporal_gbuffer_note();
@@ -2530,7 +2548,45 @@ bool bind_u32_indices(const std::vector<uint32_t>& idx) {
     return true;
 }
 
+// DKB stand-in ([nvn] record_reset_standin, default on): gsys vertex shader 660c7e4b16dc48c9 draws one point per terrain chunk; each point loads
+// a 64-bit address from vertex storage buffer 0 (c[0]+0x110, 8 bytes per vertex id) and stores {0, 1, 0, 0, 0} there: it resets the chunk's
+// indirect draw record (count 0, one instance) before the culling geometry shader adds its triangles. The translator drops stores through an
+// address loaded from memory, so the replay does those stores itself, in GPU order. Found with nxnative's notes (MIT, read only:
+// docs/reference/shaders.md "Global memory at an address loaded from memory", there c9a56f796ea4a4cd). Remove once the translator emits them.
+bool record_reset_standin(const P_DrawArrays& p) {
+    static const bool on = nxrt::config_get_bool("nvn", "record_reset_standin", true);
+    const ShaderInfo* vs = S.stage[kVertex];
+    if (!on || !vs || vs->hash.compare(0, 16, "660c7e4b16dc48c9") != 0 || !S.render_enable) return false;
+    const GState::Bind& list = S.ssbo[kVertex][0];
+    const uint64_t first = p.first, n = p.count;
+    if (!list.addr || !resolve_buffer(list.addr + 8 * first, 8 * n).ok) {
+        log_once("record-reset-list", "record reset stand-in: the pointer list is not in a known pool; the draw is dropped");
+        return true;
+    }
+    compute_out_guard(list.addr + 8 * first, 8 * n, kOutBufferRead);   // a compute result there goes back to the pool before the CPU reads it
+    end_pass();
+    memory_barrier(F->cb);
+    static const uint32_t rec[5] = {0, 1, 0, 0, 0};
+    uint32_t done = 0;
+    for (uint64_t i = 0; i < n; ++i) {
+        uint64_t a;
+        std::memcpy(&a, host_ptr(list.addr + 8 * (first + i)), 8);
+        if (!a) continue;
+        compute_out_guard(a, sizeof rec, kOutBufferWrite);
+        const BufRef b = resolve_buffer(a, sizeof rec);
+        if (!b.ok) continue;
+        gpu_wrote(a, sizeof rec, kWriteUpdate);
+        vkCmdUpdateBuffer(F->cb, b.buffer, b.offset, sizeof rec, rec);
+        ++done;
+    }
+    memory_barrier(F->cb);
+    { static int seen = 0; if (seen++ < 3) NXLOG_I("nvn.replay", "record reset stand-in (660c7e4b): %u of %llu records reset", done, static_cast<unsigned long long>(n)); }
+    gstamp("record reset");
+    return true;
+}
+
 void do_draw_arrays(const P_DrawArrays& p) {
+    if (record_reset_standin(p)) return;
     if (skip_instanced_enabled() && p.instance_count > 1) { counters().draws_skipped.fetch_add(1); return; }
     count_primitives(p.mode, p.count, p.instance_count);
     VkPrimitiveTopology topo;
@@ -2736,6 +2792,21 @@ void do_draw_indirect(const P_DrawIndirect& p) {
     if (indexed && isz == 1 && !noted_u8) { noted_u8 = true; NXLOG_I("nvn.replay", "replay: indirect draw with 8-bit indices (first): VK_EXT_index_type_uint8"); }
     const uint64_t cmd_size = indexed ? 20 : 16;
     const uint64_t n_cmds = p.multi && p.count_address ? std::max<uint64_t>(1, p.max_count) : 1;
+    {   // [nvn] log_indirect = N (debug): the arguments (from the pool) of the first N indirect draws, then of any with a count or instance count above 2^20
+        static const int64_t n_log = nxrt::config_get_int("nvn", "log_indirect", 0);
+        static int64_t logged = 0, odd = 0;
+        if (n_log > 0 && !p.multi && resolve_buffer(p.indirect_address, cmd_size).ok) {
+            uint32_t w[5] = {};
+            std::memcpy(w, host_ptr(p.indirect_address), cmd_size);
+            const bool big = w[0] > (1u << 20) || w[1] > (1u << 20);
+            if (logged < n_log || (big && odd < 64)) {
+                ++(logged < n_log ? logged : odd);
+                NXLOG_I("nvn.replay", "indirect %s at %llx: %u %u %u %u %u%s (vs %.8s fs %.8s)", indexed ? "indexed" : "arrays", static_cast<unsigned long long>(p.indirect_address),
+                        w[0], w[1], w[2], w[3], indexed ? w[4] : 0u, big ? " BIG" : "", S.stage[kVertex] ? S.stage[kVertex]->hash.c_str() : "-",
+                        S.stage[kFragment] ? S.stage[kFragment]->hash.c_str() : "-");
+            }
+        }
+    }
     BufRef ib = held_or_pool(p.indirect_address, (p.stride ? static_cast<uint64_t>(p.stride) : cmd_size) * (n_cmds - 1) + cmd_size, kOutIndirect, false);
     if (indexed) {
         BufRef xb = resolve_buffer(p.index_address, 4);

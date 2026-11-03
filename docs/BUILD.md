@@ -553,3 +553,35 @@ Windowed runs, Continue chosen in the menu by hand (two Enters: welcome screen, 
 - **Control: stand-in (all 27 NDSR hashes skipped) plus `sync_submits` also loses the device**, at the same checkpoint (`035e93d0/de4208db`, 55.6 s). Without
   `sync_submits` the stand-in run is stable. So the NDSR translation is not shown to be faulty; slowing the GPU (the real network, or synchronous submits) exposes a
   fault in these draws, likely through the dynamic resolution change. Not checked yet: which resolution triggers it, and what those draws read.
+
+## Bisecting the light/smoke draws — 2026-11-03 (night, part 8)
+
+New debug option `[nvn] trace_fs = "HASH ..."` (`NXRT_NVN_TRACE_FS`): the first three draws with each listed fragment shader are traced in any frame.
+All runs: stand-in (NDSR skipped), `sync_submits`, checkpoints, Continue chosen by hand.
+
+- **The faulting draws are the first uses of the smoke shaders, at scene entry.** `e820028e` and `de4208db` are draws #4 and #5 of the failing frame (720x405
+  RGBA16F + DEPTH32F, dynamic resolution; other frames 1440x810 and 1047x589). `de4208db` only reads: 3 uniform blocks and 9 textures, among them the scene depth
+  (DEPTH32F 1440x810), a 3D R8 128x8x128 (t15903) and a cube R11G11B10F 128x128x6 (t15902), both GPU-made ("mem 0%"). It writes no storage.
+- **Skipping `de4208db e820028e d5d300fb` (`NXRT_NVN_SKIP_FS_FILE`) gives gameplay** (DK in the mining tunnel, "Explore the mining tunnel", HUD) with
+  `sync_submits`, no GPU fault: the first sync run that reaches gameplay.
+- **Live bisection (the skip file is re-read twice a second):** re-enabling `d5d300fb`, then `e820028e`, ran clean for 20 s each; about 20 s after `de4208db` came back
+  the device was lost at other draws (`bdf65347/274b9d58`). So the fault is tied to the first frames of the scene (and probably `de4208db`), not to every use of these shaders.
+- Not found yet: what in those first frames is invalid (a texture not ready or of another type than the shader's 3D/cube binding, a uniform block range, the depth
+  texture at another size than the target). Next: trace `de4208db`'s first draws with texture descriptors (view type vs SPIR-V type), with `[gfx] robust_buffer_access`.
+
+## Terrain record reset stand-in; open state at the end of the day — 2026-11-03 (night, part 9)
+
+- **Cause of the geometry shader skip found.** gsys vertex shader `660c7e4b16dc48c9` (points, one per terrain chunk) loads a 64-bit address from vertex
+  storage buffer 0 and stores `{0, 1, 0, 0, 0}` there, resetting the chunk's indirect draw record. The translator drops stores through an address loaded from
+  memory (`results.tsv`: 2 such ops in the game, this Store and a Load in compute `3f8180ba`). The culling geometry shader `498d2702` then `ATOMG.ADD`s into a
+  record that is never reset and writes its 16-bit indices from the old count on, ever further out of its index buffer: why `498d2702` lost the GPU.
+  Same finding as nxnative's notes (MIT, read only: "Global memory at an address loaded from memory", their hash `c9a56f796ea4a4cd`).
+- **Stand-in:** `record_reset_standin` (`nvn_replay.cpp`, `[nvn] record_reset_standin`, default on, DKB-specific) replaces that draw with GPU-ordered
+  20-byte writes (`vkCmdUpdateBuffer`, `gpu_wrote`). Checked: about 1,470 records reset per draw. With `498d2702` no longer skipped the device was still lost
+  (43.6 s), so the scene-entry fault (part 8) remains and the terrain picture is unchecked. The proper fix is in the translator (physical storage pointers
+  through a guest-address table, as nxnative does), not done.
+- **Debug options added:** `[nvn] log_indirect = N` (indirect draw arguments; with `498d2702` skipped every record read 0, nothing huge), `trace_fs` (part 8).
+- **Checked against nxnative and already present here:** Switch 2 system tick 31.25 MHz, Switch 2 GOB order (`nvn_untile_shader.inc`, same bit order),
+  conditional render gating clears, colour feedback through a copy of the attachment (covers the mip-chain case).
+- **Open:** the scene-entry device loss (first frames of the smoke shaders, `de4208db`); the translator's loaded-pointer stores; HMNMX2 / HSETP2 semantics vs
+  nxnative; SUATOM 0x593 (3 NDSR shaders); NVN2 device values. `run_dkb.ps1` still skips `498d2702` and the 27 NDSR shaders by default.
