@@ -442,6 +442,9 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 case "VOTE": case "VOTEU": EmitVoteAmpere(ctx, i); return;
                 case "REDUX": EmitReduxAmpere(ctx, i); return;
                 case "MATCH": EmitMatchAmpere(ctx, i); return;
+                case "HMMA": EmitHmmaAmpere(ctx, i); return;
+                case "LDSM": EmitLdsmAmpere(ctx, i); return;
+                case "MOVM": EmitMovmAmpere(ctx, i); return;
             }
             throw Unsup();
         }
@@ -1657,6 +1660,115 @@ namespace Ryujinx.Graphics.Shader.Instructions
             if (o.Count == 3) Dst(ctx, o[0], EmitBallot(ctx, pred));
             Op pd = o[^2];
             if (!(IsPredKind(pd) && pd.Reg == 7)) Dst(ctx, pd, EmitVote(ctx, mode, pred));
+        }
+
+        // ---- tensor ops (per-lane emulation with subgroup shuffles; 32-wide subgroups assumed, as the warp) -----------------------
+        // Fragment layouts are those NVIDIA documents for PTX mma.m16n8k16 / ldmatrix / movmatrix: g = lane / 4, t = lane % 4.
+        // A (16x16, row-major): a0 (row g, k 2t..2t+1), a1 (row g+8), a2 (row g, k 2t+8..), a3 (row g+8, k 2t+8..); B (16x8): b0 (k 2t..2t+1, col g), b1 (k 2t+8.., col g);
+        // C/D: f16 c0 (row g, cols 2t..2t+1), c1 (row g+8); f32 c0, c1 (row g, cols 2t, 2t+1), c2, c3 (row g+8). m16n8k8 keeps a0, a1, b0 only.
+        // ldmatrix: lane l of matrix i gives the address of row l - 8i; register i of lane (g, t) holds row g, columns 2t..2t+1 (transposed: rows 2t, 2t+1, column g).
+        static IrOperand LaneIndex(EmitterContext ctx) => ctx.BitwiseAnd(ctx.Load(StorageKind.Input, IoVariable.SubgroupLaneId), Const(0x1f));
+
+        static IrOperand Half16(EmitterContext ctx, IrOperand word, IrOperand shiftBits) => ctx.BitwiseAnd(ctx.ShiftRightU32(word, shiftBits), Const(0xffff));
+
+        static void EmitHmmaAmpere(EmitterContext ctx, SassInst i)
+        {
+            IReadOnlyList<Op> o = i.Operands;
+            bool k16 = Has(i, "16816"), k8 = Has(i, "1688");
+            if (!k16 && !k8) throw Unsup("HMMA shape");
+            bool f32 = Has(i, "F32");
+            int ra = o[1].Reg, rb = o[2].Reg, rc = o[3].Reg;
+            IrOperand lane = LaneIndex(ctx);
+            IrOperand g = ctx.ShiftRightU32(lane, Const(2)), t = ctx.BitwiseAnd(lane, Const(3));
+            IrOperand[,] a = new IrOperand[2, 8];
+            for (int tp = 0; tp < 4; tp++)
+            {
+                IrOperand src = ctx.IAdd(ctx.ShiftLeft(g, Const(2)), Const(tp));
+                for (int r = 0; r < 2; r++)
+                {
+                    a[r, tp] = ctx.Shuffle(Gpr(ra + r), src, Const(0x1f)).Item1;
+                    if (k16) a[r, 4 + tp] = ctx.Shuffle(Gpr(ra + 2 + r), src, Const(0x1f)).Item1;
+                }
+            }
+            IrOperand[,] b = new IrOperand[2, 8];
+            for (int cc = 0; cc < 2; cc++)
+                for (int tp = 0; tp < 4; tp++)
+                {
+                    IrOperand src = ctx.IAdd(ctx.ShiftLeft(t, Const(3)), Const(4 * cc + tp));
+                    b[cc, tp] = ctx.Shuffle(Gpr(rb), src, Const(0x1f)).Item1;
+                    if (k16) b[cc, 4 + tp] = ctx.Shuffle(Gpr(rb + 1), src, Const(0x1f)).Item1;
+                }
+            IrOperand[,] c = new IrOperand[2, 2];
+            for (int r = 0; r < 2; r++)
+            {
+                if (f32) { c[r, 0] = ctx.Copy(Gpr(rc + 2 * r)); c[r, 1] = ctx.Copy(Gpr(rc + 2 * r + 1)); }
+                else { IrOperand w = ctx.Copy(Gpr(rc + r)); c[r, 0] = ctx.UnpackHalf2x16Low(w); c[r, 1] = ctx.UnpackHalf2x16High(w); }
+            }
+            int pairs = k16 ? 8 : 4;
+            IrOperand[,] d = new IrOperand[2, 2];
+            for (int r = 0; r < 2; r++)
+                for (int cc = 0; cc < 2; cc++)
+                {
+                    IrOperand acc = c[r, cc];
+                    for (int p = 0; p < pairs; p++)
+                    {
+                        acc = ctx.FPFusedMultiplyAdd(ctx.UnpackHalf2x16Low(a[r, p]), ctx.UnpackHalf2x16Low(b[cc, p]), acc);
+                        acc = ctx.FPFusedMultiplyAdd(ctx.UnpackHalf2x16High(a[r, p]), ctx.UnpackHalf2x16High(b[cc, p]), acc);
+                    }
+                    d[r, cc] = acc;
+                }
+            for (int r = 0; r < 2; r++)
+            {
+                if (f32) { DstWord(ctx, o[0], 2 * r, d[r, 0]); DstWord(ctx, o[0], 2 * r + 1, d[r, 1]); }
+                else DstWord(ctx, o[0], r, ctx.PackHalf2x16(d[r, 0], d[r, 1]));
+            }
+        }
+
+        static void EmitLdsmAmpere(EmitterContext ctx, SassInst i)
+        {
+            if (ctx.TranslatorContext.Definitions.Stage != ShaderStage.Compute) throw Unsup("shared memory outside compute");
+            IReadOnlyList<Op> o = i.Operands;
+            int count = Has(i, "4") ? 4 : Has(i, "2") ? 2 : 1;
+            bool transposed = Has(i, "MT88");
+            IrOperand addr = ctx.Copy(MemAddress(ctx, o[1]));
+            IrOperand lane = LaneIndex(ctx);
+            IrOperand g = ctx.ShiftRightU32(lane, Const(2)), t = ctx.BitwiseAnd(lane, Const(3));
+            int id = ctx.ResourceManager.SharedMemoryId;
+            IrOperand LoadWord(IrOperand byteAddr) => ctx.Load(StorageKind.SharedMemory, id, ctx.ShiftRightU32(byteAddr, Const(2)));
+            IrOperand LoadHalf(IrOperand byteAddr) => Half16(ctx, LoadWord(byteAddr), ctx.ShiftLeft(ctx.BitwiseAnd(byteAddr, Const(2)), Const(3)));
+            IrOperand[] res = new IrOperand[count];
+            for (int m = 0; m < count; m++)
+            {
+                if (!transposed)
+                {
+                    IrOperand row = ctx.Shuffle(addr, ctx.IAdd(g, Const(8 * m)), Const(0x1f)).Item1;
+                    res[m] = ctx.Copy(LoadWord(ctx.IAdd(row, ctx.ShiftLeft(t, Const(2)))));
+                }
+                else
+                {
+                    IrOperand r0 = ctx.IAdd(ctx.ShiftLeft(t, Const(1)), Const(8 * m));
+                    IrOperand row0 = ctx.Shuffle(addr, r0, Const(0x1f)).Item1;
+                    IrOperand row1 = ctx.Shuffle(addr, ctx.IAdd(r0, Const(1)), Const(0x1f)).Item1;
+                    IrOperand colOff = ctx.ShiftLeft(g, Const(1));
+                    IrOperand h0 = LoadHalf(ctx.IAdd(row0, colOff)), h1 = LoadHalf(ctx.IAdd(row1, colOff));
+                    res[m] = ctx.Copy(ctx.BitwiseOr(h0, ctx.ShiftLeft(h1, Const(16))));
+                }
+            }
+            for (int m = 0; m < count; m++) DstWord(ctx, o[0], m, res[m]);
+        }
+
+        static void EmitMovmAmpere(EmitterContext ctx, SassInst i)
+        {
+            // MOVM.16.MT88: the 8x8 b16 matrix held as (row g, cols 2t..2t+1) comes back transposed: (rows 2t, 2t+1, column g)
+            IReadOnlyList<Op> o = i.Operands;
+            IrOperand src = ctx.Copy(Src(ctx, o[1]));
+            IrOperand lane = LaneIndex(ctx);
+            IrOperand g = ctx.ShiftRightU32(lane, Const(2)), t = ctx.BitwiseAnd(lane, Const(3));
+            IrOperand sel = ctx.ShiftLeft(ctx.BitwiseAnd(g, Const(1)), Const(4));
+            IrOperand lane0 = ctx.IAdd(ctx.ShiftLeft(t, Const(3)), ctx.ShiftRightU32(g, Const(1)));
+            IrOperand lo = Half16(ctx, ctx.Shuffle(src, lane0, Const(0x1f)).Item1, sel);
+            IrOperand hi = Half16(ctx, ctx.Shuffle(src, ctx.IAdd(lane0, Const(4)), Const(0x1f)).Item1, sel);
+            Dst(ctx, o[0], ctx.BitwiseOr(lo, ctx.ShiftLeft(hi, Const(16))));
         }
 
         /// Value of `v` in lane `lane` (an IDX shuffle over the whole warp).

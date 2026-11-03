@@ -2817,8 +2817,23 @@ void ndsr_standin(uint32_t x, uint32_t y) {
     gstamp("ndsr stand-in");
 }
 
+// [nvn] skip_cs_hashes = "HASH ..." (env NXRT_NVN_SKIP_CS_HASHES): a compute program whose hash starts with one of these is treated as having no program (the NDSR stand-in
+// answers it when the shape fits). "ndsr" lists every translated NDSR upscaler shader.
+bool skip_cs_dispatch(const std::string& hash) {
+    static const std::vector<std::string> list = [] {
+        std::vector<std::string> v;
+        std::istringstream in(nxrt::config_get_str("nvn", "skip_cs_hashes", ""));
+        for (std::string w; in >> w;) v.push_back(w);
+        return v;
+    }();
+    for (const std::string& p : list)
+        if (hash.compare(0, p.size(), p) == 0) return true;
+    return false;
+}
+
 void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     const ShaderInfo* cs = S.stage[kCompute];
+    if (cs && skip_cs_dispatch(cs->hash)) cs = nullptr;
     TRACE("dispatch %u %u %u indirect %llx cs %s%s%s", x, y, z, static_cast<unsigned long long>(indirect), cs ? cs->hash.c_str() : "-",
           !cs && !g_cs_missing.empty() ? " missing " : "", !cs ? g_cs_missing.c_str() : "");
     if (!cs) {

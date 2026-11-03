@@ -504,3 +504,19 @@ What makes the picture work (all four are needed):
 4. NDSR **stand-in** (`ndsr_standin()` in `nvn_replay.cpp`): bilinear blit instead of agl's tensor-core upscaler. Replace it when HMMA/LDSM/MOVM are translated.
 
 Known gaps at this milestone: upscaler is a stand-in; geometry shader `498d2702` draws skipped; 4 fragment and 3 vertex NDSR blocks untranslated; colours, other scenes and long runs unchecked.
+
+## HMMA / LDSM / MOVM translated, but the live NDSR shaders lose the GPU — 2026-11-03 (night, part 5)
+
+- **Translator.** `ampere/decoder/SassDecoder.Tensor.cs` decodes HMMA (0x23c: .1688 / .16816, F16 or F32 accumulator), LDSM (0x83b: 1/2/4 matrices, M88 or transposed MT88) and MOVM (0x23a, MT88);
+  field positions from NAK `sm70_encode.rs` (MIT; fetched to the ignored `work/nak/`). `AmpereEmit.cs` (`EmitHmmaAmpere`, `EmitLdsmAmpere`, `EmitMovmAmpere`) emulates them per lane with
+  subgroup shuffles in the PTX mma.m16n8k16 / ldmatrix / movmatrix fragment layouts (32 shuffles and 64 FMAs per HMMA.16816; F16 accumulate is done in f32 and rounded once at the end).
+  Result: **24 of the 27 NDSR compute shaders translate and pass `spirv-val`** (SPIR-V of 5-6 MB each); 3 remain (SUATOM `.UNKNOWN_593` x2, `.UNKNOWN_481`). They are merged into
+  `work/shaders/dkb_spirv_full` (`results.tsv.bak_pre_ndsr` is the previous table).
+- **Not verified numerically.** There is no GPU or CPU reference test for the three ops yet; the layouts are from the PTX documentation, not checked against hardware output.
+- **Live result: device lost.** With the NDSR compute shaders active the game loses the GPU after ~53 s (`vkQueueSubmit2 failed (-4)`, window black). `NXRT_NVN_SKIP_CS_HASHES` (new,
+  `[nvn] skip_cs_hashes`, hash prefixes; a skipped compute program takes the stand-in path) bisected it: skipping all 27 is stable; `efc55988` alone loses the device, and so does
+  everything except `efc55988` (so more than one shader does, probably all the large ones). Cause unknown: candidates are the driver/TDR on 5-6 MB shaders, the c[0] push-constant /
+  storage layout of NVN2 compute (nxnative: "compute lays out c[0] per shader from its control section, push constants first"), or a bug in the emulation.
+- **Default.** `run_dkb.ps1` sets `NXRT_NVN_SKIP_CS_HASHES` to all 27 NDSR prefixes, so the default run is the stable stand-in picture. Set it to another value (e.g. `none`) to try the real shaders.
+- **Next:** run one NDSR shader in isolation (a small compute test with known input) to check the emulation, check the compute c[0] layout for these shaders, then compile-time (2 s for the 5 MB SPIR-V
+  at pipeline creation) and TDR behaviour.
