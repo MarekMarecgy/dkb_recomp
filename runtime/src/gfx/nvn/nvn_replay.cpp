@@ -2876,6 +2876,18 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     if (!pl) return;
     prepare_textures(*pl);
     end_pass();
+    const bool trace_was = g_trace;
+    {   // the first two dispatches of each program with root tables (the NDSR upscaler) are traced: their bindings and pushed words
+        static std::unordered_map<std::string, int> seen;
+        if (cs->control.c0_root_bytes() && seen[cs->hash]++ < 2) {
+            static const bool next = nxrt::config_get_bool("nvn", "trace_after_root_dispatch", false);   // also trace the next frame (what reads the result)
+            if (next && g_trace_frame < 0) g_trace_frame = static_cast<int64_t>(counters().presents.load()) + 1;
+            g_trace = true;
+            std::string words;
+            for (uint32_t i = 0; i < cs->control.c0_root_words[0] && i < 16; ++i) { char t[16]; uint32_t v; std::memcpy(&v, S.cs_root[0] + 4 * i, 4); std::snprintf(t, sizeof t, " %08x", v); words += t; }
+            TRACE("dispatch %u %u %u cs %s (root tables): table 0:%s", x, y, z, cs->hash.c_str(), words.c_str());
+        }
+    }
     if (g_trace) {   // the compute bindings: buffers (source, slot, address), texel buffers and textures, and the first words of each uniform block
         for (const BindingDesc& d : pl->bindings) {
             const DescriptorBinding& b = d.shader->refl.bindings[d.index];
@@ -2903,6 +2915,7 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
             }
         }
     }
+    g_trace = trace_was;
     VkPipeline pipe = compute_pipeline(cs, *pl);
     if (!pipe) return;
     vkCmdBindPipeline(F->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);

@@ -538,3 +538,18 @@ Known gaps at this milestone: upscaler is a stand-in; geometry shader `498d2702`
 - **Result: device still lost.** Windowed run with `NXRT_NVN_SKIP_CS_HASHES=none` after Continue: `vkQueueSubmit2 failed (-4)` (45 s; with `sync_submits` at 78 s, the visible part of
   the failing submit was draws `vs 6a810154 fs 3e36ff1d`). The root-table fix is needed but not sufficient. Not done yet: the run with `NXRT_GFX_DIAGNOSTIC_CHECKPOINTS=1`,
   the isolated HMMA op test against a CPU reference, and pipeline compile time.
+
+## The device loss is not in the NDSR shaders — 2026-11-03 (night, part 7)
+
+Windowed runs, Continue chosen in the menu by hand (two Enters: welcome screen, then the menu), `NXRT_NVN_SYNC_SUBMITS=1` and `NXRT_GFX_DIAGNOSTIC_CHECKPOINTS=1`:
+
+- **The NDSR dispatches run and finish.** New one-shot log: the first two dispatches of each program with root tables print their bindings and pushed words
+  (`[nvn] trace_after_root_dispatch` also traces the next frame). The pushed rectangles match the bound textures (input 0..1727 x 0..971 = t15384 1728x972,
+  output 0..2879 x 0..1619 = t1387 2880x1620, both R11G11B10F); storage buffer slot 2 holds 12 KiB of f16 weights. Input sizes change between frames
+  (1728x972, 1440x810, 2095x1179): the game's dynamic resolution.
+- **The GPU faults in draws, not in the dispatch.** Same checkpoints in three runs: bottom of pipe reached `draw vs 6a62d9d9 fs e820028e`, top of pipe
+  `draw vs 035e93d0 fs de4208db`; the failing submit's NDSR dispatch (`cs 9e1b2285`, op 319 of 321) comes after them. Neighbouring draw `2a62e37e/d5d300fb` is an
+  instanced draw into an 864x486 RGBA16F + DEPTH32F target with large vertex/fragment storage buffers (the light-quad family from part 2).
+- **Control: stand-in (all 27 NDSR hashes skipped) plus `sync_submits` also loses the device**, at the same checkpoint (`035e93d0/de4208db`, 55.6 s). Without
+  `sync_submits` the stand-in run is stable. So the NDSR translation is not shown to be faulty; slowing the GPU (the real network, or synchronous submits) exposes a
+  fault in these draws, likely through the dynamic resolution change. Not checked yet: which resolution triggers it, and what those draws read.
