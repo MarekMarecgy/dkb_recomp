@@ -51,7 +51,7 @@ namespace SpirvHarness
         static readonly Dictionary<string, string> GlslcByHash = new();   // --reflect <corpus>: code hash -> GLSLC output
 
         /// NVN2 (Switch 2) control section: magic 0x98761234, version 201 (docs/AMPERE.md section 3).
-        public static bool IsNvn2(byte[] ctrl) => ctrl != null && ctrl.Length >= 0xd8 && BitConverter.ToUInt32(ctrl, 0) == 0x98761234 && BitConverter.ToUInt32(ctrl, 4) == 201;
+        public static bool IsNvn2(byte[] ctrl) => ctrl != null && ctrl.Length >= 0xd0 && BitConverter.ToUInt32(ctrl, 0) == 0x98761234 && BitConverter.ToUInt32(ctrl, 4) == 201;
 
         static int Main(string[] args)
         {

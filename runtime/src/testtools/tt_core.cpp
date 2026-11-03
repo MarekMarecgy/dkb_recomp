@@ -665,7 +665,9 @@ void end_run(int code, const char* verdict, const std::string& message) {
         flush_files(s);
         if (s.trace) std::fflush(s.trace);
     }
+#if NXRT_WITH_GFX
     nxrt::gfx::wait_screenshot_writes();   // shots are written on a worker
+#endif
     ExitFn fn = s.exit_fn ? s.exit_fn : default_exit;
     fn(code);
 }

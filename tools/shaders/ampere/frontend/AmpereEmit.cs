@@ -1092,7 +1092,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 Dst(ctx, o[0], ExtractSmallInt(ctx, small, GetBitOffset(ctx, addr), v));
                 return;
             }
-            for (int w = 0; w < words; w++) DstWord(ctx, o[0], w, LoadCbuf(ctx, c, w));
+            // Read every word before writing any: "LDC.64 R12, c[0x1][R12]" overwrites its own index register with the first word
+            // (DKB text vertex shader c92c4a36057f7404: the glyph texture coordinate came out as the second word's index).
+            IrOperand[] loaded = new IrOperand[words];
+            for (int w = 0; w < words; w++) loaded[w] = LoadCbuf(ctx, c, w);
+            for (int w = 0; w < words; w++) DstWord(ctx, o[0], w, loaded[w]);
         }
 
         /// Byte address of a [Ra(.X4|.X8|.X16) + URb + imm] operand (shared/local memory).
@@ -1306,7 +1310,7 @@ namespace Ryujinx.Graphics.Shader.Instructions
             if (rd.Reg >= 255 && rd2.Reg >= 255) return;
             foreach (string m in i.Mods)
             {
-                if (m is not ("SCR" or "LZ" or "LL" or "LB" or "DC" or "AOFFI" or "NODEP" or "MS" or "NDV" or "EF" or "EL" or "LU" or "EU" or "NA")) throw Unsup($"modifier {m}");
+                if (m is not ("SCR" or "LZ" or "LL" or "LB" or "DC" or "AOFFI" or "NODEP" or "MS" or "NDV" or "EF" or "EL" or "LU" or "EU" or "NA" or "F16")) throw Unsup($"modifier {m}");
             }
             bool scr = Has(i, "SCR");
             (SamplerType type, bool array) = DimOf(dim);
@@ -1386,6 +1390,22 @@ namespace Ryujinx.Graphics.Shader.Instructions
             if (Has(i, "NDV") && !fetch) { /* no derivatives across the quad: plain sample on the host */ }
 
             SetBindingPair binding = ctx.ResourceManager.GetTextureOrImageBinding(Instruction.TextureSample, type, TextureFormat.Unknown, flags, CbufSlotOf(ctx, bank), handle);
+            if (Has(i, "F16"))
+            {
+                // [inferred] Bit 79: the result comes back as packed half2 pairs, component 0/1 in the low/high half of the first
+                // destination and 2/3 in the second (DKB text alpha test: "TEX.SCR RZ, R4, ..., 0x8" then "HADD2.F32 R8, -RZ, R4.H0_H0").
+                int n = BitOperations.PopCount((uint)mask);
+                IrOperand[] comps = new IrOperand[n];
+                for (int c = 0; c < n; c++) comps[c] = Local();
+                ctx.TextureSample(type, flags, binding, mask, comps, sources.ToArray());
+                for (int k = 0; 2 * k < n; k++)
+                {
+                    Op dst = k == 0 ? rd : rd2;
+                    if (dst.Reg >= 255) continue;
+                    Dst(ctx, dst, ctx.PackHalf2x16(comps[2 * k], 2 * k + 1 < n ? comps[2 * k + 1] : ConstF(0)));
+                }
+                return;
+            }
             ctx.TextureSample(type, flags, binding, mask, TexDests(rd, rd2, mask), sources.ToArray());
         }
 

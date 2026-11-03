@@ -28,6 +28,7 @@
 
   <!-- Patched files: upstream path (relative to the shader project) and the patch that applies to it. -->
   <ItemGroup>
+    <ShaderPatch Include="spirv-storage-buffers-32.patch" File="Translation/ResourceManager.cs" />
     <ShaderPatch Include="spirv-else-if.patch" File="CodeGen/Spirv/SpirvGenerator.cs" />
     <ShaderPatch Include="spirv-fmz.patch" File="Instructions/InstEmitFloatArithmetic.cs" />
     <!-- PIXLD (S4d): PIXLD.MY_INDEX reads gl_SampleID, the other modes write 0 (was: not implemented, result undefined). -->
@@ -45,7 +46,8 @@
 
   <ItemGroup>
     <Compile Include="$(ShaderSrc)**/*.cs"
-             Exclude="$(ShaderSrc)bin/**;$(ShaderSrc)obj/**;$(ShaderSrc)CodeGen/Spirv/SpirvGenerator.cs;$(ShaderSrc)Instructions/InstEmitFloatArithmetic.cs;$(ShaderSrc)IntermediateRepresentation/IoVariable.cs;$(ShaderSrc)CodeGen/Spirv/IoMap.cs;$(ShaderSrc)CodeGen/Glsl/Instructions/IoMap.cs;$(ShaderSrc)CodeGen/Spirv/Declarations.cs;$(ShaderSrc)Instructions/InstEmit.cs;$(ShaderSrc)Decoders/RegisterConsts.cs;$(ShaderSrc)StructuredIr/AstOptimizer.cs;$(ShaderSrc)Translation/Optimizations/GlobalToStorage.cs" />
+             Exclude="$(ShaderSrc)bin/**;$(ShaderSrc)obj/**;$(ShaderSrc)CodeGen/Spirv/SpirvGenerator.cs;$(ShaderSrc)Instructions/InstEmitFloatArithmetic.cs;$(ShaderSrc)IntermediateRepresentation/IoVariable.cs;$(ShaderSrc)CodeGen/Spirv/IoMap.cs;$(ShaderSrc)CodeGen/Glsl/Instructions/IoMap.cs;$(ShaderSrc)CodeGen/Spirv/Declarations.cs;$(ShaderSrc)Instructions/InstEmit.cs;$(ShaderSrc)Decoders/RegisterConsts.cs;$(ShaderSrc)StructuredIr/AstOptimizer.cs;$(ShaderSrc)Translation/Optimizations/GlobalToStorage.cs;$(ShaderSrc)Translation/ResourceManager.cs" />
+    <Compile Include="$(PatchedDir)Translation/ResourceManager.cs" />
     <Compile Include="$(PatchedDir)CodeGen/Spirv/SpirvGenerator.cs" />
     <Compile Include="$(PatchedDir)Instructions/InstEmitFloatArithmetic.cs" />
     <Compile Include="$(PatchedDir)IntermediateRepresentation/IoVariable.cs" />

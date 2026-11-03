@@ -284,6 +284,13 @@ std::shared_ptr<Service> make_audio_device(uint32_t revision) {
         s.add_cmd(15, "AcquireAudioOutputDeviceNotification", not_implemented);
         s.add_cmd(16, "ReleaseAudioOutputDeviceNotification", not_implemented);
         s.add_cmd(17, "AcquireAudioInputDeviceNotification", not_implemented);
+        // Commands 19 (12 bytes in) and 20 (8 bytes in) are sent by Donkey Kong Bananza's SDK; no public documentation. Unverified bring-up
+        // answer: success without output, logged on every call. Replace with the real semantics once they are known.
+        for (const uint32_t id : {19u, 20u})
+            s.add_cmd(id, "UnknownSwitch2Cmd", [id](Request&, Response&) -> uint32_t {
+                NXLOG_W("audio", "IAudioDevice cmd %u (undocumented, Switch 2 SDK): answered with success and no output", id);
+                return 0;
+            });
         (void)revision;
     });
 }

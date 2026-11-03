@@ -46,7 +46,7 @@ namespace Nx.Shaders.Ampere
 
         static void RegisterTex()
         {
-            Action<Ctx> texMods = c => { c.Mod(87, 3, TexLod); c.Mod(c.B(76), "AOFFI"); c.Mod(c.B(78), "DC"); c.Mod(c.B(77), "NDV"); };
+            Action<Ctx> texMods = c => { c.Mod(87, 3, TexLod); c.Mod(c.B(76), "AOFFI"); c.Mod(c.B(78), "DC"); c.Mod(c.B(77), "NDV"); c.Mod(c.B(79), "F16"); };   // F16 (bit 79): [inferred] results are packed half2 pairs, see AmpereEmit.EmitTexAmpere
             Action<Ctx> tldMods = c => { c.Mod(87, 3, TexLod); c.Mod(c.B(76), "AOFFI"); c.Mod(c.B(78), "MS"); c.Mod(c.B(77), "CL"); };
             Action<Ctx> tld4Mods = c => { c.Mod(87, 2, "R", "G", "B", "A"); c.Mod(76, 2, null, "AOFFI", "PTP", "?3"); c.Mod(c.B(78), "DC"); };
             Action<Ctx> tmmlMods = c => { c.Mod(c.B(77), "NDV"); };

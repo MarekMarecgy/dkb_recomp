@@ -23,6 +23,7 @@
 #include "nxrt/config.h"
 #include "nxrt/diag.h"
 #include "nxrt/dispatch.h"
+#include "nxrt/game.h"
 #include "nxrt/kernel.h"
 #include "nxrt/log.h"
 #include "nxrt/memory.h"
@@ -852,7 +853,8 @@ NXTEST(config_switch_console_cores) {
 
 NXTEST(system_tick_monotonic_and_rate) {
     begin();
-    CHECK_EQ(k::kTickHz, 19200000ull);
+    const uint64_t hz = nxrt::game::info().platform == nxrt::game::Platform::Switch2 ? 31250000ull : 19200000ull;
+    CHECK_EQ(k::tick_hz(), hz);
     uint64_t prev = k::system_tick();
     bool monotonic = true;
     for (int i = 0; i < 100000; i++) {
@@ -866,8 +868,8 @@ NXTEST(system_tick_monotonic_and_rate) {
     Sleep(100);
     const uint64_t b = k::system_tick();
     const int64_t d = static_cast<int64_t>(b - a);
-    CHECK(d >= 1920000 - 300000);                  // Sleep(100) never returns early: at least 100 ms - 15 ms of 19.2 MHz ticks
-    CHECK(d <= 1920000 * 50);                      // and returns (a busy machine may delay the wake-up by any amount: the upper bound only catches a wrong tick rate, 50x)
+    CHECK(d >= static_cast<int64_t>(hz * 85 / 1000));  // 100 ms minus a 15 ms timing tolerance
+    CHECK(d <= static_cast<int64_t>(hz * 5));         // tolerate a delayed wake-up, but catch a wrong tick rate
 
     const uint64_t before = k::system_tick();
     ::Ctx c{};

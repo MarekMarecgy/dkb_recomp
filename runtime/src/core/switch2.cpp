@@ -112,11 +112,30 @@ void vi_get_native_window(::Ctx* c) {
 // picture for an HDR TV (Pokopia: extended 0..400, standard 0..300 nits, from its graphics-system defaults, every time it makes the layer). The
 // values go to the HDR extras ([hdr] mode = native uses them); nn::Result 0.
 void vi_layer_extended_luminance(::Ctx* c) {
+#if NXRT_WITH_GFX
     extras::hdr_note_layer_luminance(true, static_cast<uint16_t>(c->x[1]), static_cast<uint16_t>(c->x[2]));
+#endif
     c->x[0] = 0;
 }
 void vi_layer_standard_luminance(::Ctx* c) {
+#if NXRT_WITH_GFX
     extras::hdr_note_layer_luminance(false, static_cast<uint16_t>(c->x[1]), static_cast<uint16_t>(c->x[2]));
+#endif
+    c->x[0] = 0;
+}
+
+// Display capability queries Donkey Kong Bananza makes. The host reports a plain SDR display without VRR; unused outputs are left untouched.
+void vi_query_hdr_status(::Ctx* c) {   // (bool* hdr, HdrOutputFormat*, uint16_t* peak_nits, const Display*)
+    if (c->x[0]) *reinterpret_cast<uint8_t*>(c->x[0]) = 0;
+    if (c->x[2]) *reinterpret_cast<uint16_t*>(c->x[2]) = 0;
+    c->x[0] = 0;
+}
+void vi_query_vrr_supported(::Ctx* c) {   // (bool*, const Display*)
+    if (c->x[0]) *reinterpret_cast<uint8_t*>(c->x[0]) = 0;
+    c->x[0] = 0;
+}
+void vi_query_hdr_paper_white(::Ctx* c) {   // (uint16_t* nits, const Display*): the BT.2408 reference white
+    if (c->x[0]) *reinterpret_cast<uint16_t*>(c->x[0]) = 203;
     c->x[0] = 0;
 }
 
@@ -176,6 +195,14 @@ void install_switch2_hle() {
         {"_ZN2nn2vi20GetDisplayVsyncEventEPNS_2os15SystemEventTypeEPNS0_7DisplayE", vi_get_display_vsync_event},
         {"_ZN2nn2vi52SetLayerNextHdrExtendedContentLuminanceRangeMetadataEPNS0_5LayerEtt", vi_layer_extended_luminance},
         {"_ZN2nn2vi52SetLayerNextHdrStandardContentLuminanceRangeMetadataEPNS0_5LayerEtt", vi_layer_standard_luminance},
+        // Donkey Kong Bananza: the declared HDR colour gamut of the layer; the value is not used by the host presentation (nn::Result 0).
+        {"_ZN2nn2vi35SetLayerNextHdrContentGamutMetadataEPNS0_5LayerENS0_15HdrContentGamutE", vi_ok},
+        {"_ZN2nn2vi39SetLayerNextHdrToSdrToneMappingMetadataEPNS0_5LayerENS0_14HdrToneMappingE", vi_ok},
+        {"_ZN2nn2vi28SetLayerExtendedSwapIntervalEPNS0_5LayerEii", vi_ok},
+        {"_ZN2nn2vi30ClearLayerExtendedSwapIntervalEPNS0_5LayerE", vi_ok},
+        {"_ZN2nn2vi21QueryDisplayHdrStatusEPbPNS0_15HdrOutputFormatEPtPKNS0_7DisplayE", vi_query_hdr_status},
+        {"_ZN2nn2vi24QueryDisplayVrrSupportedEPbPKNS0_7DisplayE", vi_query_vrr_supported},
+        {"_ZN2nn2vi25QueryDisplayHdrPaperWhiteEPtPKNS0_7DisplayE", vi_query_hdr_paper_white},
     };
     for (const auto& it : items) {
         hle_register(it.name, it.fn);

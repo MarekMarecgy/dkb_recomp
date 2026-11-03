@@ -2212,6 +2212,18 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
             }
             TRACE("    %s ubo%u %llx/%llu%s:%s", stg == kVertex ? "vs" : "fs", slot, static_cast<unsigned long long>(ub.addr), static_cast<unsigned long long>(ub.size), ur.ok ? "" : " (outside every pool)", words.c_str());
         }
+        for (int stg = kVertex; stg <= kFragment; ++stg)
+        for (uint32_t slot = 0; slot < 16; ++slot) {    // the storage buffers bound to the vertex and the fragment stage (same word count as the uniform blocks)
+            const GState::Bind& sb = S.ssbo[stg][slot];
+            if (!sb.addr) continue;
+            BufRef sr = resolve_buffer(sb.addr, std::min<uint64_t>(sb.size ? sb.size : 16, ubo_bytes));
+            std::string words;
+            if (sr.ok) {
+                const uint32_t* w = reinterpret_cast<const uint32_t*>(sb.addr);
+                for (uint32_t i = 0; i * 4 < ubo_bytes && (sb.size == 0 || i * 4 < sb.size); ++i) { char t[16]; std::snprintf(t, sizeof t, " %08x", w[i]); words += t; }
+            }
+            TRACE("    %s ssbo%u %llx/%llu%s:%s", stg == kVertex ? "vs" : "fs", slot, static_cast<unsigned long long>(sb.addr), static_cast<unsigned long long>(sb.size), sr.ok ? "" : " (outside every pool)", words.c_str());
+        }
         TRACE("    viewport %u: %g %g %g %g depth %g..%g scissor %u: %d %d %d %d", S.nvp, S.vp[0][0], S.vp[0][1], S.vp[0][2], S.vp[0][3], S.dr[0][0], S.dr[0][1], S.nsc,
               S.sc[0][0], S.sc[0][1], S.sc[0][2], S.sc[0][3]);
         for (uint32_t i = 0; i < P.ncolor; ++i)
