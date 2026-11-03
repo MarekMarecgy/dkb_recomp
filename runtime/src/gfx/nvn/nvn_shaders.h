@@ -65,6 +65,14 @@ struct ShaderControl {
     // NVN2 compute only: the slot counts of the program's c[0] resource table (bytes +0xb1 uniform blocks, +0xb2 storage
     // buffers, +0xb3 textures, +0xb6 images). See apply_nvn2_compute_table.
     uint8_t c0_ubos = 0, c0_ssbos = 0, c0_textures = 0, c0_images = 0;
+    // NVN2 compute only: word counts of the eight root tables (push constants, bytes +0xa9..+0xb0). They sit in c[0] after the 16-byte
+    // header, before the resource table; nvnCommandBufferPushComputeConstants fills them.
+    uint8_t c0_root_words[8] = {};
+    uint32_t c0_root_bytes() const {
+        uint32_t n = 0;
+        for (uint8_t w : c0_root_words) n += w;
+        return 4 * n;
+    }
 };
 
 ShaderControl read_control(const uint8_t* control);

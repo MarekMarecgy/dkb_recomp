@@ -554,6 +554,26 @@ void nvnCommandBufferDispatchComputeIndirect(NVNcommandBuffer* cmd, NVNbufferAdd
     cb->rec->emit(Op::DispatchIndirect, p);
 }
 
+// NVN2 root tables of compute programs (ShaderControl::c0_root_words), copied at record time. The argument order (table, byte offset,
+// size, data) is inferred: DKB only calls it as (0, 0, 0x20, data), so a non-zero table or offset is logged.
+void nvnCommandBufferPushComputeConstants(NVNcommandBuffer* cmd, int table, int offset, int size, const void* data) {
+    static std::atomic<int> odd{0};
+    if ((table || offset) && odd.fetch_add(1) < 8)
+        NXLOG_W("nvn", "PushComputeConstants(table %d, offset %d, size %d): non-zero table or offset, argument order unconfirmed", table, offset, size);
+    if (!data || size <= 0 || table < 0 || table >= 8 || offset < 0 || offset + size > kMaxRootTableBytes) {
+        NXLOG_W("nvn", "PushComputeConstants(table %d, offset %d, size %d) ignored", table, offset, size);
+        return;
+    }
+    std::unique_lock<std::mutex> lk;
+    CommandBuffer* cb = begin_record(cmd, lk);
+    if (!cb) return;
+    P_PushConstants p = zeroed<P_PushConstants>();
+    p.table = static_cast<uint32_t>(table);
+    p.offset = static_cast<uint32_t>(offset);
+    p.size = static_cast<uint32_t>(size);
+    cb->rec->emit(Op::PushComputeConstants, p, data, p.size);
+}
+
 void nvnCommandBufferDrawTexture(NVNcommandBuffer* cmd, NVNtextureHandle handle, const NVNdrawTextureRegion* dst, const NVNdrawTextureRegion* src) {
     std::unique_lock<std::mutex> lk;
     CommandBuffer* cb = begin_record(cmd, lk);
@@ -691,6 +711,7 @@ void register_api_cmd_work() {
     NVN_REG(nvnCommandBufferPushDebugGroup);
     NVN_REG(nvnCommandBufferPopDebugGroup);
     NVN_REG(nvnCommandBufferPopDebugGroupId);
+    NVN2_REG(nvnCommandBufferPushComputeConstants);
     NVN2_REG(nvnCommandBufferPushDebugGroupGraphics);
     NVN2_REG(nvnCommandBufferPushDebugGroupCompute);
     NVN2_REG(nvnCommandBufferPopDebugGroupGraphics);

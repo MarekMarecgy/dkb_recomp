@@ -520,3 +520,21 @@ Known gaps at this milestone: upscaler is a stand-in; geometry shader `498d2702`
 - **Default.** `run_dkb.ps1` sets `NXRT_NVN_SKIP_CS_HASHES` to all 27 NDSR prefixes, so the default run is the stable stand-in picture. Set it to another value (e.g. `none`) to try the real shaders.
 - **Next:** run one NDSR shader in isolation (a small compute test with known input) to check the emulation, check the compute c[0] layout for these shaders, then compile-time (2 s for the 5 MB SPIR-V
   at pipeline creation) and TDR behaviour.
+
+## NDSR compute: root tables (push constants) in c[0] — 2026-11-03 (night, part 6)
+
+- **Found.** The 22 tensor-core NDSR compute shaders have control byte `+0xa9` = 8 (root table 0: 8 words); their c[0] table is 0x78 = 0x10 header + 0x20 root table +
+  3 ssbos + 1 texture + 2 images, so the descriptors start at 0x30, not 0x10. `apply_nvn2_compute_table` ignored the root tables: the storage buffer at word 0x14 (byte 0x50),
+  the texture at 0x60 and the image at 0x70 fell outside the assumed ranges and kept wrong slots. The SASS reads c[0][0x10..0x2c] as integer rectangles (offsets and IMNMX clamps,
+  including the SUST coordinates); the game sets them with `nvnCommandBufferPushComputeConstants(cmd, 0, 0, 0x20, data)`, which was a logging stub, so they were 0.
+- **Changed.** `ShaderControl::c0_root_words` (+0xa9..+0xb0) shifts the table; `nvnCommandBufferPushComputeConstants` records `Op::PushComputeConstants`; a compute program
+  with root tables binds a per-dispatch 4 KiB c[0] copy from the upload ring with the tables at 0x10. Argument order is inferred (DKB only passes 0, 0); non-zero values are logged.
+  `sync_submits` now logs the failing submit's ops one per line (the single line was cut at ~2 KB).
+- **Cross-check (read only): [nxnative](https://github.com/seedds/nxnative) (MIT).** Its `InstEmitAmpereTensor.cs` uses the same PTX fragment layouts and shuffle indices for HMMA,
+  LDSM and MOVM as `AmpereEmit.cs` (compared by hand), and runs DKB's NDSR network on Metal (per-lane emulation 2-6.5 ms a frame; later `simdgroup_matrix`). Its
+  `push_const` takes (cmd, word seen 0, byte offset, size, data); the compute data are two rectangles (input origin and inclusive last texel, then output), read from the start of
+  c[0]; the network reads texture slot 0 and writes image slot 1, which the shifted table now gives. Its known pitfalls do not apply here: LDSM addresses are unscaled in our decoder,
+  and no MUFU.F16 occurs in `efc55988`. This is consistency with another implementation, not a hardware reference.
+- **Result: device still lost.** Windowed run with `NXRT_NVN_SKIP_CS_HASHES=none` after Continue: `vkQueueSubmit2 failed (-4)` (45 s; with `sync_submits` at 78 s, the visible part of
+  the failing submit was draws `vs 6a810154 fs 3e36ff1d`). The root-table fix is needed but not sufficient. Not done yet: the run with `NXRT_GFX_DIAGNOSTIC_CHECKPOINTS=1`,
+  the isolated HMMA op test against a CPU reference, and pipeline compile time.

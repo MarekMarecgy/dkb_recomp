@@ -560,7 +560,15 @@ uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint
         static const bool sync = nxrt::config_get_bool("nvn", "sync_submits", false);   // debug: wait after every submit and name what a lost device was running
         if (sync && !unsignalled && r == VK_SUCCESS) {
             const VkResult w = vkQueueWaitIdle(g->dev->queue());
-            if (w != VK_SUCCESS) NXLOG_E(kTag, "the GPU failed (%d) while running this submit, which recorded:%s", static_cast<int>(w), recent_ops_text().c_str());
+            if (w != VK_SUCCESS) {   // one line per op: a single line is cut by the logger
+                const std::string ops = recent_ops_text();
+                NXLOG_E(kTag, "the GPU failed (%d) while running this submit, which recorded:", static_cast<int>(w));
+                for (size_t a = 0, b; a < ops.size(); a = b + 1) {
+                    b = ops.find('\n', a);
+                    if (b == std::string::npos) b = ops.size();
+                    if (b > a) NXLOG_E(kTag, "  op: %s", ops.substr(a, b - a).c_str());
+                }
+            }
         }
     }
     if (nxrt::config_get_bool("nvn", "sync_submits", false)) clear_recent_ops();

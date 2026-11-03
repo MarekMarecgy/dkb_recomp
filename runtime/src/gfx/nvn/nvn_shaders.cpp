@@ -126,6 +126,7 @@ ShaderControl read_control(const uint8_t* control) {
             c.c0_ssbos = control[0xb2];
             c.c0_textures = control[0xb3];
             c.c0_images = control[0xb6];
+            for (int i = 0; i < 8; i++) c.c0_root_words[i] = control[0xa9 + i];
         }
         return c;
     }
@@ -753,9 +754,11 @@ namespace {
 // u16 +0xba equals 0x10 + 0x10 * (ubos + ssbos) + 8 * (textures + images) in all 3,142 compute blocks of the corpus.
 // Checked on e764a3f2 (sb at 0x10), 62619a57 (3 ubos: sb at 0x40, texture at 0x50), 7dbc445a (texture 0x40, image 0x48)
 // and 0034791c (2 ubos, 30 textures from 0x30 by GLSLC binding, image at 0x120).
+// Root tables (push constants, ShaderControl::c0_root_words) come between the header and the descriptors: the 22 tensor-core NDSR
+// upscaler shaders have 8 words (0x20 bytes at 0x10), table size 0x78 = 0x10 + 0x20 + 3 ssbos + 1 texture + 2 images.
 void apply_nvn2_compute_table(ShaderReflection& refl, const ShaderControl& c) {
     if (!c.nvn2 || c.stage != 5) return;
-    const int ub0 = 0x10, sb0 = ub0 + 0x10 * c.c0_ubos, tex0 = sb0 + 0x10 * c.c0_ssbos;
+    const int ub0 = 0x10 + static_cast<int>(c.c0_root_bytes()), sb0 = ub0 + 0x10 * c.c0_ubos, tex0 = sb0 + 0x10 * c.c0_ssbos;
     const int img0 = tex0 + 8 * c.c0_textures, end = img0 + 8 * c.c0_images;
     for (DescriptorBinding& b : refl.bindings) {
         NvnMeaning& m = b.nvn;

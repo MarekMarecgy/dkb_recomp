@@ -208,7 +208,8 @@ const char* op_name(Op op) {
     "ResumeXfb",
     "DrawXfb",
     "PushDebugGroup",
-    "PopDebugGroup"};
+    "PopDebugGroup",
+    "PushComputeConstants"};
     const size_t i = static_cast<size_t>(op);
     return i < sizeof(kNames) / sizeof(kNames[0]) ? kNames[i] : "?";
 }

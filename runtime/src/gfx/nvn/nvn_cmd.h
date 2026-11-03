@@ -36,6 +36,7 @@ enum class Op : uint16_t {
     BeginXfb, EndXfb, PauseXfb, ResumeXfb,            // transform feedback: P_Counter (address = the control buffer)
     DrawXfb,                                          // DrawTransformFeedback: P_DrawXfb (draws what the control buffer's feedback section wrote)
     PushDebugGroup, PopDebugGroup,                    // debug labels, recorded only when the back end has VK_EXT_debug_utils: P_DebugGroup (+ blob: the name, NUL ended)
+    PushComputeConstants,                             // NVN2 compute root table data: P_PushConstants (+ blob: size bytes)
     Count
 };
 const char* op_name(Op op);
@@ -100,7 +101,9 @@ struct P_DispatchIndirect { uint64_t address; };
 struct P_Counter { uint32_t type, pad; uint64_t address; };                                    // ReportCounter / ResetCounter(address 0)
 struct P_ReportValue { uint32_t value, pad; uint64_t address; };
 struct P_DrawXfb { uint32_t mode, pad; uint64_t control; };                                    // DrawTransformFeedback: the primitive and the feedback control buffer address
-struct P_DebugGroup { uint32_t id, length; };                                                  // PushDebugGroup (blob: length + 1 bytes) / PopDebugGroup (length 0)
+struct P_PushConstants { uint32_t table, offset, size, pad; };                                // PushComputeConstants (blob: size bytes)
+constexpr int kMaxRootTableBytes = 4 * 255;                                                    // a root table's word count is one control byte
+struct P_DebugGroup { uint32_t id, length; };                                                 // PushDebugGroup (blob: length + 1 bytes) / PopDebugGroup (length 0)
 struct P_Barrier { uint32_t bits, pad; };
 struct P_Sync { Sync* sync; uint32_t condition, flags; };                                      // FenceSync (condition, flags) / WaitSync
 struct P_Event { Event* event; uint32_t mode, location, index, value, pad; };                 // SignalEvent: mode (NVNeventSignalMode), location, index, value; WaitEvent: mode = NVNeventWaitMode, value

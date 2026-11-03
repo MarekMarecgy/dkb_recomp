@@ -54,6 +54,7 @@ struct GState {
     Bind vtx[16], ubo[6][16], ssbo[6][16], xfb[4];
     uint64_t tex[6][64] = {};
     uint64_t img[6][16] = {};
+    uint8_t cs_root[8][kMaxRootTableBytes] = {};   // NVN2 compute root tables (PushComputeConstants), copied into c[0] per dispatch
     Ref<TexturePool> tpool;
     Ref<SamplerPool> spool;
     VertexAttribInfo attr[16];
@@ -1153,7 +1154,8 @@ void compute_out_guard(uint64_t addr, uint64_t size, int why) {
 // Ops after which the pending results may stay in the pool copy: state that touches no memory, barriers (the copies carry their own),
 // dispatches (they check their own ranges) and calls of other lists (their ops are checked one by one). Anything else may read the pool.
 bool compute_out_may_wait(Op op) {
-    if (op == Op::Dispatch || op == Op::DispatchIndirect || op == Op::Barrier || op == Op::CallCommands || op == Op::PushDebugGroup || op == Op::PopDebugGroup) return true;
+    if (op == Op::Dispatch || op == Op::DispatchIndirect || op == Op::Barrier || op == Op::CallCommands || op == Op::PushDebugGroup || op == Op::PopDebugGroup ||
+        op == Op::PushComputeConstants) return true;
     return op < Op::DrawArrays && op != Op::SetRenderEnable && op != Op::SetRenderTargets;
 }
 
@@ -1237,7 +1239,7 @@ void out_before_op(const RecordReader& r) {
     if (!out_any()) return;
     switch (r.op()) {
         case Op::Dispatch: case Op::DispatchIndirect: case Op::Barrier: case Op::CallCommands: case Op::PushDebugGroup: case Op::PopDebugGroup:
-        case Op::ClearColor: case Op::ClearDepthStencil: case Op::ClearTexture: case Op::CopyTextureToTexture: case Op::Downsample:
+        case Op::PushComputeConstants: case Op::ClearColor: case Op::ClearDepthStencil: case Op::ClearTexture: case Op::CopyTextureToTexture: case Op::Downsample:
         case Op::DrawTexture: case Op::DiscardColor: case Op::DiscardDepthStencil: case Op::ResolveDepth: case Op::FenceSync: case Op::WaitSync:
         case Op::ResetCounter: case Op::WaitEvent: case Op::SetRenderEnable:
             return;
@@ -1470,6 +1472,22 @@ VkDescriptorSet build_set(const ProgLayout& pl, uint32_t set) {
                     VkDeviceSize range = 0;
                     VkBuffer buf = driver_constants_buffer(&range);
                     if (buf) bi = {buf, 0, range};
+                    const ShaderControl& c = d.shader->control;
+                    if (d.nvn_stage == kCompute && c.c0_root_bytes()) {
+                        // a compute program with root tables: c[0] from the upload ring, the tables at 0x10 in table order, the rest zero
+                        const VkDeviceSize n = 0x1000;
+                        UploadAlloc u = F->upload(n, std::max<VkDeviceSize>(device().properties().limits.minUniformBufferOffsetAlignment, 256));
+                        if (u) {
+                            std::memset(u.ptr, 0, n);
+                            uint32_t at = 0x10;
+                            for (int t = 0; t < 8; ++t) {
+                                const uint32_t bytes = 4u * c.c0_root_words[t];
+                                if (at + bytes <= n) std::memcpy(u.ptr + at, S.cs_root[t], bytes);
+                                at += bytes;
+                            }
+                            bi = {u.buffer, u.offset, n};
+                        }
+                    }
                     break;
                 }
                 case NvnSource::ConstantData: {
@@ -3253,7 +3271,7 @@ void mark_dirty(const RecordReader& r) {
     switch (r.op()) {
         case Op::BindProgram: g_dirty |= kPipe | kDesc | kVb; break;
         case Op::BindBuffers: g_dirty |= r.payload<P_BindBuffers>().kind == kBufVertex ? kVb : kDesc; break;
-        case Op::BindTextures: case Op::BindImages: case Op::SetTexturePool: case Op::SetSamplerPool: g_dirty |= kDesc; break;
+        case Op::BindTextures: case Op::BindImages: case Op::SetTexturePool: case Op::SetSamplerPool: case Op::PushComputeConstants: g_dirty |= kDesc; break;
         case Op::BindVertexAttribs: case Op::BindVertexStreams: g_dirty |= kPipe | kVb; break;
         case Op::BindBlend: case Op::BindColor: case Op::BindChannelMask: case Op::BindMultisample: case Op::SetDepthClamp: g_dirty |= kPipe; break;
         case Op::BindPolygon: g_dirty |= kPipe | kDynRaster | kDynBias; break;
@@ -3451,6 +3469,11 @@ void run_list(const CmdList& list, int depth) {
                     ++g_dbg_depth;
                 }
                 break;
+            case Op::PushComputeConstants: {
+                const auto& p = r.payload<P_PushConstants>();   // bounds checked at record time
+                std::memcpy(S.cs_root[p.table] + p.offset, r.blob<P_PushConstants>(), p.size);
+                break;
+            }
             case Op::PopDebugGroup:
                 if (g_dbg_depth > 0 && vkCmdEndDebugUtilsLabelEXT) { vkCmdEndDebugUtilsLabelEXT(F->cb); --g_dbg_depth; }   // a pop whose push was in an earlier submission has nothing to close
                 break;
