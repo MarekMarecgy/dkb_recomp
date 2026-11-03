@@ -557,7 +557,13 @@ uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint
         nxrt::hitch_phase_add(nxrt::kHpRenderLockWait, nxrt::hitch_ticks() - tl);
         r = vkQueueSubmit2(g->dev->queue(), 1, &si, VK_NULL_HANDLE);
         if (unsignalled && r == VK_SUCCESS) vkQueueWaitIdle(g->dev->queue());   // debug path only: nothing else tells when it is done
+        static const bool sync = nxrt::config_get_bool("nvn", "sync_submits", false);   // debug: wait after every submit and name what a lost device was running
+        if (sync && !unsignalled && r == VK_SUCCESS) {
+            const VkResult w = vkQueueWaitIdle(g->dev->queue());
+            if (w != VK_SUCCESS) NXLOG_E(kTag, "the GPU failed (%d) while running this submit, which recorded:%s", static_cast<int>(w), recent_ops_text().c_str());
+        }
     }
+    if (nxrt::config_get_bool("nvn", "sync_submits", false)) clear_recent_ops();
     if (unsignalled) {
         g->recording = 0;
         s.serial = 0;
@@ -565,6 +571,19 @@ uint64_t submit_on_render_thread(const std::function<void(Frame&)>& record, uint
     }
     if (r != VK_SUCCESS) {
         NXLOG_E(kTag, "vkQueueSubmit2 failed (%d): the device is lost or out of memory", static_cast<int>(r));
+#ifdef VK_NV_device_diagnostic_checkpoints
+        static bool reported = false;
+        if (!reported && r == VK_ERROR_DEVICE_LOST && g->dev->features().diagnostic_checkpoints && vkGetQueueCheckpointDataNV) {
+            reported = true;
+            uint32_t n = 0;
+            vkGetQueueCheckpointDataNV(g->dev->queue(), &n, nullptr);
+            std::vector<VkCheckpointDataNV> cd(n, VkCheckpointDataNV{VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV});
+            vkGetQueueCheckpointDataNV(g->dev->queue(), &n, cd.data());
+            for (const VkCheckpointDataNV& c : cd)
+                NXLOG_E(kTag, "lost device: stage 0x%x reached checkpoint %llu: %s", static_cast<unsigned>(c.stage), static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(c.pCheckpointMarker)),
+                        checkpoint_name(reinterpret_cast<uintptr_t>(c.pCheckpointMarker)).c_str());
+        }
+#endif
         // keep the timeline moving so waiters do not hang: signal from the host
         VkSemaphoreSignalInfo ssi = {VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO};
         ssi.semaphore = g->timeline;

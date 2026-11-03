@@ -374,3 +374,54 @@ is still unmeasured. As before, blocks without GLSLC reflection get guessed text
 Cache: `work/shaders/dkb_spirv_full/` (all `.spv` plus a merged `results.tsv`, 19,518 records, includes the 39 boot blocks from the earlier cache).
 The headless probe with `NXRT_NVN_SHADER_CACHE` pointing at it ran 50 s with no errors, one block missing (the known `.UNKNOWN_526` one), menu identical.
 Nothing beyond the boot scene was rendered with the other 16,000 shaders: they are translated and validated, not exercised.
+
+## Windowed dkb.exe, input, and the GPU loss after the first Enter — 2026-11-03 (night)
+
+`game-build/dkb` now builds `dkb.exe` (same source as `dkb_boot_probe_gfx`, `DKB_PROBE_GFX`): `dkb.exe --exefs <exefs> --window [--no-pads]`
+opens an SDL window with play mode, F1 overlay and keyboard input (Enter/Space/E = A, Backspace/Shift = B, WASD = left stick, arrows = right
+stick; factory bindings in `game-build/dkb/dkb_defaults.cpp`, written to `controls.ini` on first start: delete an old `controls.ini` after changing
+them). Environment as for the probe (`NXRT_FS_ROMFS`, `NXRT_NVN_SHADER_CACHE`). SDL's gamepad start-up took ~30 s on this PC: `--no-pads` skips it.
+Because DKB has no lifted frame-boundary site, play mode now drives its frame boundary from the SVC busy hook when the game's play table names none
+(`runtime/src/gfx/play/play.cpp`, `g_self_driven`); this also keeps the window responding while the game loads.
+Also: `ISelfController` cmd 19 (`SetScreenShotImageOrientation`, per Switchbrew) answered with success.
+
+What happened with real input: Enter on the "Normal Mode" menu leads the game on (it reads `SaveMenu`/`DeleteMenu` layouts and `config.sav`, then loads a scene,
+~48k texture ids). **Then the GPU is lost** (`vkQueueSubmit2 failed (-4)`, 1-10 s after the first Enter, every run); Windows logs `nvlddmkm` event 153 each time.
+Not a TDR-style timeout message, not out of memory (nvidia-smi: ~2.7 of 16 GB used).
+
+Checked and ruled out: the 21 compute shaders enabled by the 32-slot patch (still lost without them); Vulkan validation (nothing reported before the loss; the
+early `vkCmdCopyImage` offset.z errors at 3.5 s are an unrelated runtime issue worth fixing); VRAM exhaustion; `[gfx] robust_buffer_access` (new option, default off, kept
+the device lost). Seven fragment shaders were in the submit that failed (2f51d17a, bde9711a, 46af1ba6, ...): skipping them did not help, but the ring (below) notes draws
+before the skip, so that test is not conclusive either.
+
+Open lead, unproven: the game calls the NVN2 procs `nvnCommandBufferPushGraphicsConstants` (cmd, 0, 0, 0x10, data = 1/w, 1/h, w, h) and
+`PushComputeConstants` (cmd, 0, 0, 0x20, data) right before the scene; they are logging stubs. No shader reads an extra bank for them, so where the
+data should land is unknown. Not implemented. Also still stubs: `SetComputeOverlapMode`, `SetGeometryProcessingMode`, mesh-task and ray-tracing procs,
+GPU-side WaitEvent.
+
+New debug aids: `[nvn] sync_submits = true` (`NXRT_NVN_SYNC_SUBMITS=1`) waits after every submit and, if the GPU failed, logs the draws/dispatches that submit recorded
+(`recent_ops_text`); the draw trace prints storage buffers (`NXRT_NVN_TRACE_SEC`). Known gap: the ring notes a draw before `skip_fs_file` is applied.
+
+## GPU loss hunt, part 2 — 2026-11-03 (late night)
+
+Reference read (read-only, public repo https://github.com/Lucas-blip-png/dkb-pc-recomp, GPL-3.0, README and `docs/devlog.md`): another DKB port reports the same
+NVIDIA fault family ("invalid instruction pointer", instanced light-quad draws, mitigation: skip those draws), and that NVN2 push constants land in root tables
+(graphics: bank 24, read only by full-screen blit shaders; compute: `c[0]` after a 16-byte head, eight root tables with word counts at control `+0xa9..+0xb0`).
+Checked against our data: no graphics shader of the 19,298 extracted reads a bank above 0x10, and no compute shader declares root tables, so the unimplemented
+`PushGraphicsConstants`/`PushComputeConstants` are **not** shown to be the cause here. Not implemented.
+
+Fixed (real bug, validation-confirmed): `copy_texture_to_texture` passed the region's z as `offset.z` for 2D/array/cube images (the z is a layer index); it is now
+`baseArrayLayer` (`vkCmdCopyImage` and the blit path, `nvn_replay.cpp`). The `VUID-vkCmdCopyImage-*-01787/01788` errors are gone.
+
+Ruled out: instanced draws (skipping all of them, `NXRT_NVN_SKIP_INSTANCED_DRAWS`), light-list readers (`NXRT_NVN_SKIP_LIGHT_SSBO_DRAWS`), robustBufferAccess, VRAM at the first loss,
+Vulkan validation before the loss. **The culprit moves** when a draw is skipped: with `NXRT_GFX_DIAGNOSTIC_CHECKPOINTS=1` (VK_NV_device_diagnostic_checkpoints, new) the lost
+device reported `draw vs 48f02544 fs 45ab0a1f`, then after skipping `vs 48f02544` a 1x1x1 `dispatch cs ec64db4e` much later (marker 829,836 vs 114,622), and
+before that `vs c2b56dc5 / 0ee41791 / 6a810154`. That pattern points at something not tied to one shader: a GPU access to memory that becomes invalid (the guest
+memory pools are imported into Vulkan; a freed or remapped range would fault the GPU) or, late in a run, device memory exhaustion (`vmaCreateImage failed (-2)` precedes the loss at ~91 s
+in the longest run). Neither is confirmed.
+
+With the workaround skip list the run lived ~90 s in the scene (20-30 fps, audio on) and the window showed a flat light-purple frame; the user saw the same
+purple screen (its colour is near the (0.5, 0.5, 1.0) default of the normal target, i.e. the final image is not being composed yet).
+
+Tools added this round: `NXRT_GFX_DIAGNOSTIC_CHECKPOINTS=1`, `NXRT_NVN_SYNC_SUBMITS=1`, `NXRT_NVN_SKIP_FS_FILE` (now matches vertex shader hashes too and logs after skipping),
+`NXRT_NVN_SKIP_LIGHT_SSBO_DRAWS`, `NXRT_NVN_SKIP_INSTANCED_DRAWS`, `NXRT_GFX_ROBUST_BUFFER_ACCESS`; `game-build/dkb/run_dkb.ps1` starts the window build with the right environment.

@@ -311,4 +311,13 @@ void trace_dump_targets();
 // ---- present -----------------------------------------------------------------------------------------------------------
 void present_on_render_thread(Window* w, int index);
 
+// Debug ring of the draws and dispatches recorded since the last submit (render thread only). With [nvn] sync_submits = true every submit
+// waits for the GPU, and a lost device is reported together with what that submit held.
+void note_recent_op(const std::string& what);
+std::string recent_ops_text();
+void clear_recent_ops();
+// Diagnostic checkpoints ([gfx] diagnostic_checkpoints): a marker before every draw and dispatch recorded into the current command buffer, and the lookup of a
+// marker value read back from a lost device (vkGetQueueCheckpointDataNV). Empty text for an unknown value.
+std::string checkpoint_name(uint64_t id);
+
 }  // namespace nxrt::nvn::be::gpu

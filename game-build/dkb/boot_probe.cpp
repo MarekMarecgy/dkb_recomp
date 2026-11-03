@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DKB SDK boot probe (headless): maps the three NSOs, registers the lifted modules, lets the host link them and
 // enters rtld at offset 0 as the kernel would. No graphics. Structure follows game-build/src/pkp_main.cpp.
-// Usage: dkb_boot_probe [--exefs DIR] [--max-seconds N]
+// Usage: dkb_boot_probe [--exefs DIR] [--max-seconds N]   (graphics build also: --window [--screenshot-at A,B,...])
+// --window opens the game window (play mode: keyboard/pad input into the hid service, F1 overlay); the default stays headless.
 #include <windows.h>
 #include <cstdio>
 #include <cstdlib>
@@ -21,7 +22,9 @@
 #include "nxrt/gfx.h"
 #include "nxrt/nvn.h"
 #include "nxrt/nvn_backend.h"
+#include "nxrt/platform.h"
 #include "nxrt/play.h"
+const nxrt::play::GameDefaults* dkb_play_defaults();   // dkb_defaults.cpp
 #endif
 
 extern "C" {
@@ -84,19 +87,28 @@ int main(int argc, char** argv) {
     identity.product = "DKB boot probe";
     identity.program_id = 0x040074A01BF12000ull;
     identity.platform = nxrt::game::Platform::Switch2;
+#ifdef DKB_PROBE_GFX
+    identity.play_defaults = dkb_play_defaults();
+#endif
     nxrt::game::set_current(&identity);
 
     std::string exefs = std::getenv("DKB_EXEFS") ? std::getenv("DKB_EXEFS") : "";
-    int max_seconds = 30;
+    int max_seconds = -1;
+    bool window = false, no_pads = false;
     for (int i = 1; i < argc; i++) {
         if (!std::strcmp(argv[i], "--exefs") && i + 1 < argc) exefs = argv[++i];
         else if (!std::strcmp(argv[i], "--max-seconds") && i + 1 < argc) max_seconds = std::atoi(argv[++i]);
 #ifdef DKB_PROBE_GFX
         else if (!std::strcmp(argv[i], "--screenshot-at") && i + 1 < argc) g_shot_times = argv[++i];
 #endif
+#ifdef DKB_PROBE_GFX
+        else if (!std::strcmp(argv[i], "--window")) window = true;
+        else if (!std::strcmp(argv[i], "--no-pads")) no_pads = true;     // skip the gamepad subsystems (their start-up can take ~30 s with some HID devices)
+#endif
         else { std::fprintf(stderr, "unknown argument %s\n", argv[i]); return 2; }
     }
     if (exefs.empty()) die("give --exefs DIR or set DKB_EXEFS");
+    if (max_seconds < 0) max_seconds = window ? 0 : 30;
 
     nxrt::InitOptions opt;
     opt.log_path = "dkb_boot_probe.log";
@@ -117,26 +129,43 @@ int main(int argc, char** argv) {
     nxrt::nvn::install();
     {
         std::string err;
+        nxrt::play::DisplayConfig disp;
+        if (window) {
+            disp = nxrt::play::display();      // controls.ini: window size, present mode, frame cap
+            nxrt::platform::InitOptions po;
+            po.gamepads = !no_pads;
+            nxrt::platform::init(po);
+            nxrt::platform::WindowDesc wd;
+            wd.title = identity.title;
+            wd.width = disp.width;
+            wd.height = disp.height;
+            if (!nxrt::platform::create_window(wd)) die("cannot create the game window (needs a Vulkan 1.3 driver)");
+        }
         nxrt::gfx::DeviceDesc dd;
-        dd.headless = 1;
+        dd.headless = window ? 0 : 1;
         device = nxrt::gfx::Device::create(dd, &err);
         if (!device) die("graphics device: " + err);
         nxrt::gfx::RendererDesc rd;
         rd.headless_width = 1280;
         rd.headless_height = 720;
+        if (window) rd.present_mode = disp.present_mode;
         renderer = nxrt::gfx::Renderer::create(*device, rd, &err);
         if (!renderer) die("renderer: " + err);
         nxrt::nvn::BackendDesc bd;
         bd.device = device.get();
         bd.renderer = renderer.get();
+        if (window) {
+            bd.limiter = nxrt::play::limiter();
+            bd.keep_aspect = disp.keep_aspect;
+        }
         if (!nxrt::nvn::install_backend(bd)) die("NVN back end failed to start");
         g_renderer_slot = &renderer;
         if (!g_shot_times.empty()) CreateThread(nullptr, 0, shot_thread, nullptr, 0, nullptr);
         nxrt::play::StartOptions po;
         po.device = device.get();
         po.renderer = renderer.get();
-        po.window = false;
-        po.overlay = false;
+        po.window = window;
+        po.overlay = window;
         nxrt::play::start(po);
     }
 #endif

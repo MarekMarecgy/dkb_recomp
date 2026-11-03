@@ -269,6 +269,21 @@ std::string g_trigger_fs;
 // shader starts with one of them are not drawn. The file is read again twice a second, so it can change while the game runs.
 std::vector<std::string> g_skip_fs;
 int g_draw_idx = 0;   // draws begun in this frame
+
+bool skip_instanced_enabled() {   // [nvn] skip_instanced_draws = true: debug, drops every direct draw with more than one instance
+    static const bool on = nxrt::config_get_bool("nvn", "skip_instanced_draws", false);
+    return on;
+}
+bool light_ssbo_skip_enabled() {
+    static const bool on = nxrt::config_get_bool("nvn", "skip_light_ssbo_draws", false);
+    return on;
+}
+// The fragment stage reads a storage buffer whose descriptor sits at c[0]+0x510 (the first one of the fragment stage).
+bool fragment_reads_light_ssbo(const ShaderInfo& fs) {
+    for (const DescriptorBinding& d : fs.refl.bindings)
+        if (d.type == DescriptorType::StorageBuffer && d.nvn.c0_offset == 0x510) return true;
+    return false;
+}
 bool skip_fs_draw(const std::string& hash) {
     static const std::string file = nxrt::config_get_str("nvn", "skip_fs_file", "");
     if (file.empty()) return false;
@@ -2113,7 +2128,16 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     if (!vs) { log_once("draw-no-vs", "draw without a vertex shader skipped"); return false; }
     if (!S.render_enable) return false;
     ++g_draw_idx;
-    if (S.stage[kFragment] && skip_fs_draw(S.stage[kFragment]->hash)) return false;
+    // [nvn] skip_fs_file: a hash prefix of the fragment or the vertex shader drops the draw (debug bisection of a GPU fault)
+    if ((S.stage[kFragment] && skip_fs_draw(S.stage[kFragment]->hash)) || skip_fs_draw(vs->hash)) return false;
+    // [nvn] skip_light_ssbo_draws = true (WORKAROUND, the picture loses that lighting): on NVIDIA GPUs the large fragment shaders of Donkey Kong Bananza's
+    // instanced light draws, which read the light-list storage buffer at c[0]+0x510 byte by byte in data-dependent loops, lose the device (nvlddmkm
+    // event 153) when the scene loads; the cause is not known. Another PC port of the game skips the same family of draws.
+    if (S.stage[kFragment] && light_ssbo_skip_enabled() && fragment_reads_light_ssbo(*S.stage[kFragment])) {
+        counters().draws_skipped.fetch_add(1);
+        return false;
+    }
+    note_recent_op("draw vs " + vs->hash.substr(0, 8) + " fs " + (S.stage[kFragment] ? S.stage[kFragment]->hash.substr(0, 8) : std::string("-")));
     // Tessellation: Vulkan runs it only with both shaders and a patch list. NVN also allows an evaluation shader alone (fixed levels from
     // SetInner/OuterTessellationLevels): those draws get a generated pass-through control shader (passthrough_tcs_for).
     if (S.stage[kTessCtl] || S.stage[kTessEval] || mode == NVN_DRAW_PRIMITIVE_PATCHES) {
@@ -2463,6 +2487,7 @@ bool bind_u32_indices(const std::vector<uint32_t>& idx) {
 }
 
 void do_draw_arrays(const P_DrawArrays& p) {
+    if (skip_instanced_enabled() && p.instance_count > 1) { counters().draws_skipped.fetch_add(1); return; }
     count_primitives(p.mode, p.count, p.instance_count);
     VkPrimitiveTopology topo;
     if (!begin_draw(static_cast<int>(p.mode), false, 0, &topo)) { counters().draws_skipped.fetch_add(1); return; }
@@ -2486,6 +2511,7 @@ void do_draw_arrays(const P_DrawArrays& p) {
 }
 
 void do_draw_elements(const P_DrawElements& p) {
+    if (skip_instanced_enabled() && p.instance_count > 1) { counters().draws_skipped.fetch_add(1); return; }
     count_primitives(p.mode, p.count, p.instance_count);
     VkPrimitiveTopology topo;
     if (!begin_draw(static_cast<int>(p.mode), true, static_cast<int>(p.type), &topo)) { counters().draws_skipped.fetch_add(1); return; }
@@ -2772,6 +2798,7 @@ void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
         vkCmdDispatchIndirect(F->cb, ind.buffer, ind.offset);
     } else {
         vkCmdDispatch(F->cb, x, y, z);
+        note_recent_op("dispatch " + std::to_string(x) + "x" + std::to_string(y) + "x" + std::to_string(z) + " cs " + cs->hash.substr(0, 8));
         if (gpass_on()) gstamp(("cs " + cs->hash.substr(0, 8)).c_str());
     }
     shadows_after_dispatch();
@@ -3038,7 +3065,16 @@ void do_copy_texture_texture(const P_CopyTexTex& p) {
         c.srcOffset = {sr.x, sr.y, sr.z};
         c.dstOffset = {dr.x, dr.y, dr.z};
         c.extent = {static_cast<uint32_t>(sr.w), static_cast<uint32_t>(sr.h), static_cast<uint32_t>(std::max(1, sr.d))};
-        if (s->b.target != NVN_TEXTURE_TARGET_3D && sr.d > 1) { c.srcSubresource.layerCount = c.dstSubresource.layerCount = sr.d; c.extent.depth = 1; c.srcOffset.z = c.dstOffset.z = 0; }
+        const bool s3d = s->b.target == NVN_TEXTURE_TARGET_3D, d3d = d->b.target == NVN_TEXTURE_TARGET_3D;
+        if (s3d == d3d && !s3d) {
+            // 2D, array and cube textures: the region's z is a layer index, never a depth offset (Vulkan: offset.z must be 0 for a 2D image; the old
+            // code passed it through and the GPU read and wrote outside the image)
+            c.srcSubresource.baseArrayLayer = ss.layer + static_cast<uint32_t>(std::max(0, sr.z));
+            c.dstSubresource.baseArrayLayer = ds.layer + static_cast<uint32_t>(std::max(0, dr.z));
+            c.srcOffset.z = c.dstOffset.z = 0;
+            c.extent.depth = 1;
+            if (sr.d > 1) c.srcSubresource.layerCount = c.dstSubresource.layerCount = static_cast<uint32_t>(sr.d);
+        }
         vkCmdCopyImage(F->cb, tex_image(s), sl, tex_image(d), dl, 1, &c);
     } else {
         VkImageBlit b = {};
@@ -3048,6 +3084,16 @@ void do_copy_texture_texture(const P_CopyTexTex& p) {
         b.srcOffsets[1] = {sr.x + sr.w, sr.y + sr.h, sr.z + std::max(1, sr.d)};
         b.dstOffsets[0] = {dr.x, dr.y, dr.z};
         b.dstOffsets[1] = {dr.x + dr.w, dr.y + dr.h, dr.z + std::max(1, dr.d)};
+        if (s->b.target != NVN_TEXTURE_TARGET_3D) {          // a layer index, not a depth range (see the copy above)
+            b.srcSubresource.baseArrayLayer = ss.layer + static_cast<uint32_t>(std::max(0, sr.z));
+            b.srcOffsets[0].z = 0;
+            b.srcOffsets[1].z = 1;
+        }
+        if (d->b.target != NVN_TEXTURE_TARGET_3D) {
+            b.dstSubresource.baseArrayLayer = ds.layer + static_cast<uint32_t>(std::max(0, dr.z));
+            b.dstOffsets[0].z = 0;
+            b.dstOffsets[1].z = 1;
+        }
         const bool linear = (p.flags & NVN_COPY_FLAGS_LINEAR_FILTER_BIT) || (tex_scale(s) != tex_scale(d) && !tex_is_depth(s) && !tex_is_depth(d));
         vkCmdBlitImage(F->cb, tex_image(s), sl, tex_image(d), dl, 1, &b, linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
     }
@@ -3745,5 +3791,32 @@ struct ReplayGauges {
 };
 ReplayGauges g_replay_gauges;
 }  // namespace
+
+
+namespace {
+std::vector<std::string> g_recent_ops;
+std::vector<std::string> g_ckpt_names(8192);
+uint64_t g_ckpt_next = 0;
+}  // namespace
+std::string checkpoint_name(uint64_t id) {
+    return id && id <= g_ckpt_next && g_ckpt_next - id < g_ckpt_names.size() ? g_ckpt_names[id % g_ckpt_names.size()] : std::string();
+}
+void note_recent_op(const std::string& what) {
+    if (g_recent_ops.size() >= 512) g_recent_ops.erase(g_recent_ops.begin(), g_recent_ops.begin() + 256);
+    g_recent_ops.push_back(what);
+#ifdef VK_NV_device_diagnostic_checkpoints
+    if (F && F->cb && device().features().diagnostic_checkpoints && vkCmdSetCheckpointNV) {
+        ++g_ckpt_next;
+        g_ckpt_names[g_ckpt_next % g_ckpt_names.size()] = what;
+        vkCmdSetCheckpointNV(F->cb, reinterpret_cast<const void*>(static_cast<uintptr_t>(g_ckpt_next)));
+    }
+#endif
+}
+std::string recent_ops_text() {
+    std::string t;
+    for (const std::string& o : g_recent_ops) t += "\n    " + o;
+    return t;
+}
+void clear_recent_ops() { g_recent_ops.clear(); }
 
 }  // namespace nxrt::nvn::be::gpu

@@ -584,6 +584,8 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     const bool x_aal = !headless && add_ext(VK_AMD_ANTI_LAG_EXTENSION_NAME, &aal);
     features_.external_memory_host = has_dext(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
     if (features_.external_memory_host) dev_exts.push_back(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+    features_.diagnostic_checkpoints = nxrt::config_get_bool("gfx", "diagnostic_checkpoints", false) && has_dext(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+    if (features_.diagnostic_checkpoints) dev_exts.push_back(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
     if (has_dext(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME)) { dev_exts.push_back(VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME); features_.push_descriptor = true; }
     // availability query: one chain holding all the structs
     a11.pNext = &a12; a12.pNext = &a13; a13.pNext = chain;
@@ -593,7 +595,9 @@ bool Device::init(const DeviceDesc& desc, std::string* error) {
     a13.dynamicRendering = VK_TRUE;
     a13.synchronization2 = VK_TRUE;
     a13.robustImageAccess = VK_FALSE;
-    avail.features.robustBufferAccess = VK_FALSE;
+    // [gfx] robust_buffer_access = true keeps it: a game whose shaders read past the size a buffer was bound with (global memory on the console has
+    // no range check) would otherwise fault the GPU (device lost); costs speed.
+    if (!nxrt::config_get_bool("gfx", "robust_buffer_access", false)) avail.features.robustBufferAccess = VK_FALSE;
     VkPhysicalDeviceFeatures2& en = avail;
     const VkPhysicalDeviceFeatures& af = avail.features;
     features_.bc = af.textureCompressionBC;

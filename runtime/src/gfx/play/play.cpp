@@ -68,9 +68,18 @@ namespace {
 // thread that owns the window it pumps the events when the last pump is 100 ms old. Elsewhere it costs a thread-id compare.
 std::atomic<DWORD> g_pump_tid{0};
 std::atomic<uint64_t> g_last_pump_ms{0};
+// A game without a frame-boundary site in its play table (no entry hook was lifted for it) drives the frame boundary itself: update_hook runs
+// from busy_pump on the guest main thread every ~8 ms, without the frame pacing (the presenting thread's limiter still paces the picture).
+bool g_self_driven = false;
+int update_hook(::Ctx*, uint64_t, void*);
 void busy_pump() {
     if (GetCurrentThreadId() != g_pump_tid.load(std::memory_order_relaxed)) return;
     const uint64_t t = SDL_GetTicks();
+    if (g_self_driven) {
+        if (t - g_last_pump_ms.load(std::memory_order_relaxed) < 8) return;
+        update_hook(nullptr, 0, nullptr);          // stores g_last_pump_ms and pumps the events
+        return;
+    }
     if (t - g_last_pump_ms.load(std::memory_order_relaxed) < 100) return;
     g_last_pump_ms.store(t, std::memory_order_relaxed);
     platform::pump_events();
@@ -667,7 +676,7 @@ int update_hook(::Ctx*, uint64_t, void*) {
     // All of it runs once per presented frame: the game's main loop runs more iterations than it presents frames (Pokopia ~79 against ~50 a
     // second), and per iteration the limiter took several slots per frame while the in-flight list (one id per sim_begin, one popped per
     // present) filled up until wait_in_flight held the main thread for presents that only come after more main-loop work.
-    const bool frame_start = extras::pace_boundary_due();
+    const bool frame_start = !g_self_driven && extras::pace_boundary_due();
     if (frame_start) {
         extras::LowLatency* ll = extras::lowlat();
         if (extras::pace_in_main()) {
@@ -1222,7 +1231,10 @@ bool start(const StartOptions& opt) {
     }
     // the frame boundary, then the game's input, camera, lock-on and menu hooks (hooks of one address run in registration order)
     if (gp && gp->frame_update) st.hook_update = hook_add_entry(st.base + gp->frame_update, &update_hook);
-    else NXLOG_W(kTag, "the game (%s) names no frame update: play mode is not pumped", game::info().id);
+    else if (st.window) {
+        g_self_driven = true;
+        NXLOG_I(kTag, "the game (%s) names no frame update: play mode drives its frame boundary from the SVC busy hook", game::info().id);
+    } else NXLOG_W(kTag, "the game (%s) names no frame update and there is no window: play mode is not pumped", game::info().id);
     if (gp && gp->install) gp->install(st.base, &g_game_host, st.settings);
     st.started = true;
     NXLOG_I(kTag, "play mode started (%s, overlay %s, base 0x%llx, game %s, frame hook %u)", st.window ? "window" : "no window", st.overlay ? "on" : "off",

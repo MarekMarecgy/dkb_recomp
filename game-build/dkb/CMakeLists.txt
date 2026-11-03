@@ -34,16 +34,20 @@ set(DKB_GFX_DIR "${DKB_ROOT}/build/runtime-gfx" CACHE PATH "Graphics build of th
 set(DKB_TEXTURES_DIR "${DKB_ROOT}/tools/textures/build/release" CACHE PATH "Built tools/textures libraries")
 if(EXISTS "${DKB_GFX_DIR}/nxrt_gfx.lib")
   file(GLOB DKB_SDL_LIB "${DKB_GFX_DIR}/_deps/sdl3-build/SDL3-static.lib")
-  add_executable(dkb_boot_probe_gfx boot_probe.cpp)
-  target_compile_features(dkb_boot_probe_gfx PRIVATE cxx_std_20)
-  target_compile_definitions(dkb_boot_probe_gfx PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN DKB_PROBE_GFX=1)
-  target_include_directories(dkb_boot_probe_gfx PRIVATE "${DKB_ROOT}/runtime/include" "${DKB_ROOT}/recomp/include")
-  target_include_directories(dkb_boot_probe_gfx SYSTEM PRIVATE "${DKB_GFX_DIR}/_deps/volk-src" "${DKB_GFX_DIR}/_deps/vulkan_headers-src/include"
-    "${DKB_GFX_DIR}/_deps/vma-src/include" "${DKB_GFX_DIR}/_deps/imgui-src" "${DKB_GFX_DIR}/_deps/sdl3-src/include" "${DKB_ROOT}/runtime/src/gfx/nvn/third_party")
-  target_compile_definitions(dkb_boot_probe_gfx PRIVATE VMA_STATIC_VULKAN_FUNCTIONS=0 VMA_DYNAMIC_VULKAN_FUNCTIONS=1)
-  target_link_libraries(dkb_boot_probe_gfx PRIVATE dkb_main dkb_sdk dkb_rtld
-    "${DKB_GFX_DIR}/nxrt_gfx.lib" "${DKB_GFX_DIR}/nxrt.lib" "${DKB_GFX_DIR}/nxrt_volk.lib" "${DKB_GFX_DIR}/nxrt_imgui.lib"
-    "${DKB_GFX_DIR}/nxrt_tiling.lib" "${DKB_TEXTURES_DIR}/astc2bc7.lib" "${DKB_TEXTURES_DIR}/bc7e_ispc.lib" ${DKB_SDL_LIB}
-    psapi user32 gdi32 winmm imm32 ole32 oleaut32 version uuid advapi32 setupapi shell32 cfgmgr32 shlwapi mf mfplat mfreadwrite mfuuid xaudio2 d3d11 dxgi dwmapi)
-  target_link_options(dkb_boot_probe_gfx PRIVATE /HIGHENTROPYVA:NO /STACK:67108864 /MAP)
+  function(dkb_gfx_exe name)
+    add_executable(${name} boot_probe.cpp dkb_defaults.cpp)
+    target_compile_features(${name} PRIVATE cxx_std_20)
+    target_compile_definitions(${name} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN DKB_PROBE_GFX=1 VMA_STATIC_VULKAN_FUNCTIONS=0 VMA_DYNAMIC_VULKAN_FUNCTIONS=1)
+    target_include_directories(${name} PRIVATE "${DKB_ROOT}/runtime/include" "${DKB_ROOT}/recomp/include" "${DKB_ROOT}/runtime/src/gfx" "${DKB_ROOT}/runtime/src/gfx/play")
+    target_include_directories(${name} SYSTEM PRIVATE "${DKB_GFX_DIR}/_deps/volk-src" "${DKB_GFX_DIR}/_deps/vulkan_headers-src/include"
+      "${DKB_GFX_DIR}/_deps/vma-src/include" "${DKB_GFX_DIR}/_deps/imgui-src" "${DKB_GFX_DIR}/_deps/sdl3-src/include" "${DKB_ROOT}/runtime/src/gfx/nvn/third_party")
+    target_link_libraries(${name} PRIVATE dkb_main dkb_sdk dkb_rtld
+      "${DKB_GFX_DIR}/nxrt_gfx.lib" "${DKB_GFX_DIR}/nxrt.lib" "${DKB_GFX_DIR}/nxrt_volk.lib" "${DKB_GFX_DIR}/nxrt_imgui.lib"
+      "${DKB_GFX_DIR}/nxrt_tiling.lib" "${DKB_TEXTURES_DIR}/astc2bc7.lib" "${DKB_TEXTURES_DIR}/bc7e_ispc.lib" ${DKB_SDL_LIB}
+      psapi user32 gdi32 winmm imm32 ole32 oleaut32 version uuid advapi32 setupapi shell32 cfgmgr32 shlwapi mf mfplat mfreadwrite mfuuid xaudio2 d3d11 dxgi dwmapi)
+    target_link_options(${name} PRIVATE /HIGHENTROPYVA:NO /STACK:67108864 /MAP)
+  endfunction()
+  dkb_gfx_exe(dkb_boot_probe_gfx)
+  dkb_gfx_exe(dkb)   # the same program under the game's name; run with --window for play mode
 endif()
+

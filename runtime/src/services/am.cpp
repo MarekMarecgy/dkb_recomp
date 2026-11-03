@@ -470,6 +470,7 @@ ServicePtr make_self_controller() {
         s.add_cmd(13, "SetFocusHandlingMode", ignored("SetFocusHandlingMode"));
         s.add_cmd(14, "SetRestartMessageEnabled", ignored("SetRestartMessageEnabled"));
         s.add_cmd(16, "SetOutOfFocusSuspendingEnabled", ignored("SetOutOfFocusSuspendingEnabled"));
+        s.add_cmd(19, "SetScreenShotImageOrientation", ignored("SetScreenShotImageOrientation"));   // Switchbrew ISelfController; DKB sends it at the menu (in 4 bytes)
         s.add_cmd(40, "CreateManagedDisplayLayer", [](Request&, Response& rsp) -> uint32_t {
             std::lock_guard<std::mutex> lk(mu());
             rsp.push<uint64_t>(st().next_layer++);
