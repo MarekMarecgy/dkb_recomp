@@ -99,6 +99,16 @@ struct GState {
 
 GState S;
 
+// The colour targets the last draws rendered to, newest first (the NDSR stand-in's input is the last full-size image the frame composed).
+Ref<Texture> g_recent_rt[6];
+void note_recent_rt(const Ref<Texture>& t) {
+    if (!t || g_recent_rt[0].get() == t.get()) return;
+    int k = 5;
+    for (int i = 1; i < 6; ++i) if (g_recent_rt[i].get() == t.get()) { k = i; break; }
+    for (int i = k; i > 0; --i) g_recent_rt[i] = g_recent_rt[i - 1];
+    g_recent_rt[0] = t;
+}
+
 struct Target {
     Texture* tex = nullptr;
     uint32_t level = 0, layer = 0, layers = 1;
@@ -282,6 +292,19 @@ bool light_ssbo_skip_enabled() {
 bool fragment_reads_light_ssbo(const ShaderInfo& fs) {
     for (const DescriptorBinding& d : fs.refl.bindings)
         if (d.type == DescriptorType::StorageBuffer && d.nvn.c0_offset == 0x510) return true;
+    return false;
+}
+// [nvn] skip_gs_hashes = "HASH HASH ..." (env NXRT_NVN_SKIP_GS_HASHES; WORKAROUND): draws whose geometry shader hash starts with one of these are not drawn.
+// Donkey Kong Bananza's geometry shader 498d2702 loses the device on NVIDIA GPUs (nvlddmkm 153) in the first minute of the scene.
+bool skip_gs_draw(const std::string& hash) {
+    static const std::vector<std::string> list = [] {
+        std::vector<std::string> v;
+        std::istringstream in(nxrt::config_get_str("nvn", "skip_gs_hashes", ""));
+        for (std::string w; in >> w;) v.push_back(w);
+        return v;
+    }();
+    for (const std::string& p : list)
+        if (hash.compare(0, p.size(), p) == 0) return true;
     return false;
 }
 bool skip_fs_draw(const std::string& hash) {
@@ -2128,8 +2151,11 @@ bool begin_draw(int mode, bool indexed, int index_type, VkPrimitiveTopology* top
     if (!vs) { log_once("draw-no-vs", "draw without a vertex shader skipped"); return false; }
     if (!S.render_enable) return false;
     ++g_draw_idx;
-    // [nvn] skip_fs_file: a hash prefix of the fragment or the vertex shader drops the draw (debug bisection of a GPU fault)
-    if ((S.stage[kFragment] && skip_fs_draw(S.stage[kFragment]->hash)) || skip_fs_draw(vs->hash)) return false;
+    if (S.ncolor) note_recent_rt(S.color_tex[0]);
+    // [nvn] skip_fs_file: a hash prefix of the fragment, geometry or vertex shader drops the draw (debug bisection of a GPU fault)
+    if (S.stage[kGeometry] && skip_gs_draw(S.stage[kGeometry]->hash)) return false;
+    if ((S.stage[kFragment] && skip_fs_draw(S.stage[kFragment]->hash)) || (S.stage[kGeometry] && skip_fs_draw(S.stage[kGeometry]->hash)) ||
+        skip_fs_draw(vs->hash)) return false;
     // [nvn] skip_light_ssbo_draws = true (WORKAROUND, the picture loses that lighting): on NVIDIA GPUs the large fragment shaders of Donkey Kong Bananza's
     // instanced light draws, which read the light-list storage buffer at c[0]+0x510 byte by byte in data-dependent loops, lose the device (nvlddmkm
     // event 153) when the scene loads; the cause is not known. Another PC port of the game skips the same family of draws.
@@ -2743,11 +2769,75 @@ void do_draw_xfb(const P_DrawXfb& p) {
 
 std::string g_cs_missing;   // trace: the untranslated block(s) of the bound compute program ("cs -" dispatches)
 
+Texture* pool_texture(uint64_t handle) {
+    const uint32_t tid = handle_texture_id(handle);
+    if (!S.tpool || static_cast<int>(tid) >= S.tpool->count) return nullptr;
+    std::shared_lock<std::shared_mutex> lk(S.tpool->lock);
+    const TexturePool::Entry& e = S.tpool->entries[tid];
+    return e.used && e.tex ? e.tex.get() : nullptr;
+}
+
+// [nvn] ndsr_standin = true (default; STAND-IN, not the game's upscaler): agl's NDSR upscaler network (tensor-core HMMA/LDSM/MOVM compute shaders the Ampere frontend
+// cannot translate yet) has no program, so its output image would keep the frame's clear colour (the purple screen). The dispatch is replaced by a bilinear blit of the
+// image it reads into the storage image it writes. The input is found by shape (the dispatch covers x*32 by y*32 texels of it) among the compute stage's bound textures.
+void ndsr_standin(uint32_t x, uint32_t y) {
+    static const bool on = nxrt::config_get_bool("nvn", "ndsr_standin", true);
+    if (!on) return;
+    Texture* dst = nullptr;
+    for (int i = 0; i < 16 && !dst; ++i) if (S.img[kCompute][i]) dst = pool_texture(S.img[kCompute][i]);
+    // the input is the newest colour target of the dst's format that the frame rendered to and that is smaller than the dst, no wider than the dispatch's region
+    // (x*32 texels, the upscaler's input size) and wider than half of it
+    Texture* src = nullptr;
+    const int32_t want_w = static_cast<int32_t>(x * 32);
+    for (int i = 0; i < 6 && dst && !src; ++i) {
+        Texture* t = g_recent_rt[i].get();
+        if (!t || t == dst || !tex_gpu(t) || t->fmt != dst->fmt || t->b.samples > 1 || t->b.width >= dst->b.width) continue;
+        if (t->b.width <= want_w && t->b.width * 2 > want_w) src = t;
+    }
+    char a[96], b[96];
+    static int logged = 0;
+    if (!src || !dst || !tex_gpu(dst) || tex_vk_format(src) != tex_vk_format(dst)) {
+        if (logged++ < 12) NXLOG_W("nvn.replay", "ndsr stand-in: no blit (src %s, dst %s, dispatch %ux%u groups)", tex_desc(src, a, sizeof a), tex_desc(dst, b, sizeof b), x, y);
+        return;
+    }
+    if (logged++ < 12) NXLOG_I("nvn.replay", "ndsr stand-in: blit %s -> %s", tex_desc(src, a, sizeof a), tex_desc(dst, b, sizeof b));
+    end_pass();
+    tex_ensure_current(src, *F);
+    tex_ensure_current(dst, *F);
+    tex_transition(src, *F, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    tex_transition(dst, *F, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    tex_mark_gpu_written(dst);
+    VkImageBlit bl = {};
+    bl.srcSubresource = {tex_aspect(src), 0, 0, 1};
+    bl.dstSubresource = {tex_aspect(dst), 0, 0, 1};
+    bl.srcOffsets[1] = {src->b.width, src->b.height, 1};
+    bl.dstOffsets[1] = {dst->b.width, dst->b.height, 1};   // the dispatch covers the input (x*32 texels wide); the output is the whole dst
+    vkCmdBlitImage(F->cb, tex_image(src), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, tex_image(dst), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bl, VK_FILTER_LINEAR);
+    memory_barrier(F->cb);
+    gstamp("ndsr stand-in");
+}
+
 void do_dispatch(uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {
     const ShaderInfo* cs = S.stage[kCompute];
     TRACE("dispatch %u %u %u indirect %llx cs %s%s%s", x, y, z, static_cast<unsigned long long>(indirect), cs ? cs->hash.c_str() : "-",
           !cs && !g_cs_missing.empty() ? " missing " : "", !cs ? g_cs_missing.c_str() : "");
-    if (!cs) return;
+    if (!cs) {
+        if (g_trace) {   // what the programless dispatch could be bound to: the compute stage's texture, image and uniform-block state
+            for (int i = 0; i < 64; ++i) if (S.tex[kCompute][i]) TRACE("    cs- tex[%d] = %llx", i, static_cast<unsigned long long>(S.tex[kCompute][i]));
+            for (int i = 0; i < 16; ++i) if (S.img[kCompute][i]) TRACE("    cs- img[%d] = %llx", i, static_cast<unsigned long long>(S.img[kCompute][i]));
+            for (int i = 0; i < 16; ++i) {
+                const GState::Bind& u = S.ubo[kCompute][i];
+                if (!u.addr || !resolve_buffer(u.addr, 4).ok) continue;
+                const uint32_t* w = reinterpret_cast<const uint32_t*>(host_ptr(u.addr));
+                std::string words;
+                for (uint32_t k = 0; k < 64 && k * 4 < u.size; ++k) { char t[16]; std::snprintf(t, sizeof t, " %08x", w[k]); words += t; }
+                TRACE("    cs- ubo[%d] %llx/%llu:%s", i, static_cast<unsigned long long>(u.addr), static_cast<unsigned long long>(u.size), words.c_str());
+            }
+        }
+        { static int seen = 0; if (seen++ < 12) NXLOG_I("nvn.replay", "dispatch %u %u without a program (missing '%s', indirect %llx)", x, y, g_cs_missing.c_str(), static_cast<unsigned long long>(indirect)); }
+        if (!indirect) ndsr_standin(x, y);
+        return;
+    }
     const ShaderInfo* stages[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, cs};
     const ProgLayout* pl = prog_layout(stages);
     if (!pl) return;

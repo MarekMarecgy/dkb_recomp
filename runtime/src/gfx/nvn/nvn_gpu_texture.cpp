@@ -628,6 +628,13 @@ TexGpu* create_texture_gpu(Texture* t, float want_scale) {
         return fail("create_image: " + why2);
     g_live_images.fetch_add(1);
     counters().textures_created.fetch_add(1);
+    {   // debug: where the big images come from (the same storage under many texture objects would share one)
+        static std::atomic<int> n_big{0};
+        if (static_cast<uint64_t>(s.base.width) * s.base.height * s.layers >= (2u << 20) && n_big.fetch_add(1) < 120)
+            NXLOG_I(kTag, "big texture %u: %s %ux%u x%u layers, %u levels, mem %p, storage %llx, vpool %p, display %d (%lld textures live)", t->id, g->fmt ? g->fmt->name : "?",
+                    s.base.width, s.base.height, s.layers, s.levels, static_cast<void*>(t->mem), static_cast<unsigned long long>(t->storage_size),
+                    static_cast<void*>(t->vpool.get()), t->is_display ? 1 : 0, static_cast<long long>(g_live_set.size()));
+    }
     return g;
 }
 

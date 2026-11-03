@@ -28,6 +28,8 @@ nxrt::GaugeCounter& vk_gauge_query_pools();             // vk.query_pools       
 nxrt::GaugeCounter& vk_gauge_swapchains();              // vk.swapchains        VkSwapchainKHR
 nxrt::GaugeCounter& vk_gauge_memory_allocs();           // vk.memory_allocs     VkDeviceMemory from vkAllocateMemory (not VMA's own blocks)
 nxrt::GaugeCounter& vk_gauge_memory_bytes();            // vk.memory_bytes      bytes of those allocations
+nxrt::GaugeCounter& vk_gauge_image_bytes();             // vk.image_bytes       VMA allocation bytes of live images
+nxrt::GaugeCounter& vk_gauge_buffer_bytes();            // vk.buffer_bytes      VMA allocation bytes of live buffers
 
 namespace gfx {
 // Memory guard discount (vk_device.cpp). The heap whose usage the guard subtracts from the process commit: the largest device-local heap of a

@@ -425,3 +425,82 @@ purple screen (its colour is near the (0.5, 0.5, 1.0) default of the normal targ
 
 Tools added this round: `NXRT_GFX_DIAGNOSTIC_CHECKPOINTS=1`, `NXRT_NVN_SYNC_SUBMITS=1`, `NXRT_NVN_SKIP_FS_FILE` (now matches vertex shader hashes too and logs after skipping),
 `NXRT_NVN_SKIP_LIGHT_SSBO_DRAWS`, `NXRT_NVN_SKIP_INSTANCED_DRAWS`, `NXRT_GFX_ROBUST_BUFFER_ACCESS`; `game-build/dkb/run_dkb.ps1` starts the window build with the right environment.
+
+## GPU loss and VRAM growth, resolved for the first minutes — 2026-11-03 (night)
+
+Two independent problems; both were measured with `NXRT_DIAG_SOAK_CSV` (the soak sampler, now on in `run_dkb.ps1`; gauges `vma.*`, `vk.image_bytes`, `vk.buffer_bytes`).
+
+1. **VRAM growth (fixed).** DKB places a new 2048x2048x2 DEPTH16 texture in the virtual pool about every five texture ids. `texture_registry_find_alias` returned early
+   for textures without host storage (`mem == null`), so every one got its own 16 MB image: 15 GB in use and 28 GB allocated after ~90 s, then `vmaCreateImage -2` and a lost
+   device. Textures in the same virtual pool at the same offset and shape now share one image (`nvn_texture_registry.cpp`); VRAM settles at ~2-3 GB.
+   Debug lines: `image '...'` (images of 8 MB and more, first 300) and `big texture N` (first 120).
+2. **GPU loss (worked around).** Bisecting with `NXRT_NVN_SKIP_FS_FILE` (now also matches geometry shader hashes): with only geometry shader `498d2702dda52d98` drawing the
+   device is lost at ~39 s with ~2 GB in use; with it skipped the scene runs 90-100 s (the other three storage-writing geometry shaders are not the cause).
+   `[nvn] skip_gs_hashes` (`NXRT_NVN_SKIP_GS_HASHES`) drops draws using it; `run_dkb.ps1` defaults it to `498d2702`. The reason it faults is not known; the final image is
+   still the flat purple frame (not composed), so the skipped draws' effect on the picture is unmeasured.
+
+Reference (read-only): EGLANTINE `DKB_WINDOWS_PROGRESS.md` and `NX2_NOTES.md` describe the same purple screen (a terrain culling geometry shader whose list writes never reach
+the second pass, replaced there by a CPU stand-in; and a tensor upscaler, HMMA.16816.F16).
+
+## Purple screen diagnosed: the upscale pass has no shader — 2026-11-03 (night, part 2)
+
+Trace of one scene frame (`NXRT_NVN_TRACE_FRAME=9800`, with `skip_gs_hashes` active, so the device lives): the scene is drawn correctly into `t27063` (R11G11B10F 1920x1080,
+mean ~0.23/0.13/0.20) and post-processed at 1440x810, 960x540 and lower. The last pass before the present is `dispatch 60 34 1 ... cs -`: a compute dispatch with
+**no program bound** (60x34 groups of 32 = 1920x1080). It should write the 2880x1620 image `t1387` (cleared to 0.3/0.3/1 at the start of the frame); the final draw into the
+swap image `t3` samples `t1387`, so the window shows that clear colour (the purple screen). It is the upscaler pass, not the terrain.
+
+Why it has no program: the game builds some programs through the NVN2 `nvnProgramBuilder*` API (`SetDefaults`, `SetDevice`, `SetShaders(builder, count, entries)`,
+`nvnProgramInitializeFromBuilder(program, builder)`), which were logging stubs. They are now implemented in `api_program.cpp` (the entries are assumed to have the 0x18-byte
+stride of `nvnProgramSetShadersExt`; unverified). With that, the builder programs reach `SetShaders` and the log lists **28 blocks with no translated shader** (e.g.
+`cf4c5636`, `aaaba2b9`, `3decfd15`, `8569d67d`, `a9863b38`, `e2f8d329`, `632c8af8`, `cbe6ab44`, `635823b1`, `5a8d2482`, code sizes 0x300-0xa400), plus one program with a stage
+that has no code or control address. They are not in the RomFS containers extracted by `dkb_extract_bnsh.py` (the 39 boot blocks that were already missing: they are built into
+`main` or patched at run time). Next steps:
+
+1. Find those blocks inside `main` (scan its data for NVN2 control sections, magic `0x98761234`, and the code they point to), extend `dkb_extract_bnsh.py` or add a second
+   extractor, translate them with `spirv_harness` and add them to `work/shaders/dkb_spirv_full/`.
+2. Check whether the upscaler (NDSR, tensor cores: HMMA.16816.F16, LDSM, MOVM) is among them; the Ampere frontend has no implementation of those opcodes yet. EGLANTINE
+   (`NX2_NOTES.md`, `docs/dkb-render-investigation.md`) has a software HMMA for reference (GPL-3.0, read only).
+3. Verify the builder entry stride (log the entries once) and the program with the stage that has no addresses.
+
+Not yet re-checked after the builder change: whether the traced frame still ends in an empty dispatch. dkb.exe was stopped at ~47 s of that run.
+
+## The missing blocks are agl's NDSR upscaler pack — 2026-11-03 (night, part 3)
+
+- **Builder stride corrected.** nxnative (MIT, `dm/gfx/nvn/hle_nvn.c`) reads `nvnProgramBuilderSetShaders` entries as plain 16-byte `NVNshaderData`, not the 0x18-byte Ext
+  entries assumed before; `api_program.cpp` now copies `NVNshaderData[count]` and calls `nvnProgramSetShaders`.
+- **NDSR extraction.** `dkb_extract_bnsh.py` now also reads `NDSR` packs (`agl_ndsr.pck` inside `Lib/agl/agl_resource...sarc.zs`; 16-byte records from +0x10 or +0x14,
+  layout from nxnative's `shader_split.py`, read not copied). It found 30 NDSR stages. Run it with Python 3.14 on the folder `romfs/Lib/agl` (a single zstd file argument is not decompressed).
+  Output: `work/shaders/dkb_ndsr_all` (everything) and `work/shaders/dkb_ndsr` (54 blocks not yet in `dkb_spirv_full`).
+- **Check.** After the rebuild, a 60 s headless run lists **31 distinct blocks with no translated shader; all 31 are in the NDSR extract** (24 compute, 4 fragment, 3 vertex).
+- **Translation of those 54 blocks** (`spirv_harness --batch`, needs `DOTNET_ROOT=build/toolchain/dotnet`): 1 ok, 47 unsupported, 6 exceptions. All 24 upscaler compute shaders stop on
+  `.UNKNOWN_23c` (HMMA), `.UNKNOWN_23a` (MOVM) and `.UNKNOWN_83b` (LDSM); the other failures are the known `ISETP.NE.U32.EX.AND` 64-bit chains, TLD4 `.PTP`, stage-14 and
+  `GetConstantBufferBinding` index exceptions.
+- **Next:** (a) implement HMMA.16816 / LDSM / MOVM in `ampere/decoder` + `AmpereEmit.cs` (per-lane subgroup shuffles in the PTX `mma.m16n8k16` / `ldmatrix` / `movmatrix`
+  layouts; nxnative warns that LDSM's mode bits are not a stride); or (b) first a labelled stand-in that blits the composite into the 2880x1620 target when the NDSR dispatch has no
+  program (EGLANTINE does the same). Then the vertex/fragment failures above.
+
+## NDSR stand-in: the first real DKB picture — 2026-11-03 (night, part 4)
+
+`do_dispatch` (`nvn_replay.cpp`) now answers a **compute dispatch with no program** with `ndsr_standin()` (`[nvn] ndsr_standin`, default on; **STAND-IN, not the game's upscaler**):
+a bilinear `vkCmdBlitImage` from the newest R11G11B10F colour target the frame drew to (`g_recent_rt`, filled in `begin_draw`; width at most x*32 and above half of it, smaller than the
+destination) into the whole storage image bound at compute image slot 0..15 (`t1387`, 2880x1620). The dispatch covers the *input* (60x34 groups = 1920 wide; 72x41 in
+other frames), not the output. Not every program-less dispatch is the upscaler; the shape test is the only guard.
+
+Result (`DKB_SHOTS=45,60,80`, windowed, 95 s, no GPU loss): the window shows the real scene (the mining-tunnel entrance with the monkeys, mine cart, red girders), not the purple frame.
+Sharpness is that of a bilinear upscale. Not checked: colours against a reference, the other scenes, the menu, long runs. `run_dkb.ps1` takes `DKB_SHOTS` (seconds) for screenshots
+(`build/dkb-probe/dkb_shot_N.png`); the info log is `build/dkb-probe/dkb_boot_probe.log`.
+Next: HMMA/LDSM/MOVM in the Ampere frontend to replace the stand-in; the 4 fragment and 3 vertex NDSR blocks; `skip_gs_hashes` still hides terrain culling draws.
+
+## MILESTONE: working picture (tag `dkb-first-picture`) — 2026-11-03
+
+First commit in which dkb.exe shows the real game scene in the window (mining-tunnel entrance, not the purple frame), with no GPU loss in a ~95 s windowed run.
+To return to it or copy the recipe: `git checkout dkb-first-picture`, build as above, then
+`$env:DKB_SHOTS='45,60,80'; game-build/dkb/run_dkb.ps1 -Dump '<dump>/updates/458752'` (screenshots in `build/dkb-probe/dkb_shot_N.png`).
+
+What makes the picture work (all four are needed):
+1. Texture alias sharing for virtual-pool textures (`nvn_texture_registry.cpp`): stops the VRAM growth that lost the device.
+2. `[nvn] skip_gs_hashes` default `498d2702` (`run_dkb.ps1`): workaround for the GPU fault; terrain culling draws are therefore missing.
+3. NVN2 program builder (`api_program.cpp`, plain 16-byte `NVNshaderData` entries) and NDSR extraction (`dkb_extract_bnsh.py`).
+4. NDSR **stand-in** (`ndsr_standin()` in `nvn_replay.cpp`): bilinear blit instead of agl's tensor-core upscaler. Replace it when HMMA/LDSM/MOVM are translated.
+
+Known gaps at this milestone: upscaler is a stand-in; geometry shader `498d2702` draws skipped; 4 fragment and 3 vertex NDSR blocks untranslated; colours, other scenes and long runs unchecked.

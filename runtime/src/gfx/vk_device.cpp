@@ -47,6 +47,8 @@ nxrt::GaugeCounter& vk_gauge_query_pools() { static nxrt::GaugeCounter g("vk.que
 nxrt::GaugeCounter& vk_gauge_swapchains() { static nxrt::GaugeCounter g("vk.swapchains"); return g; }
 nxrt::GaugeCounter& vk_gauge_memory_allocs() { static nxrt::GaugeCounter g("vk.memory_allocs"); return g; }
 nxrt::GaugeCounter& vk_gauge_memory_bytes() { static nxrt::GaugeCounter g("vk.memory_bytes"); return g; }
+nxrt::GaugeCounter& vk_gauge_image_bytes() { static nxrt::GaugeCounter g("vk.image_bytes"); return g; }
+nxrt::GaugeCounter& vk_gauge_buffer_bytes() { static nxrt::GaugeCounter g("vk.buffer_bytes"); return g; }
 
 }  // namespace nxrt
 
@@ -853,6 +855,12 @@ VkResult Device::create_image(const ImageDesc& d, Image* out, std::string* why) 
     {   // very large images are worth a line: they decide the process' memory footprint
         VmaAllocationInfo inf{};
         vmaGetAllocationInfo(vma_, alloc, &inf);
+        vk_gauge_image_bytes().add(static_cast<int64_t>(inf.size));
+        static std::atomic<int> n_mid{0};       // images of 8 MB and more, the first 300: what a scene's VRAM is made of
+        if (inf.size >= (8ull << 20) && inf.size < (256ull << 20) && n_mid.fetch_add(1) < 300)
+            NXLOG_I(kTag, "image '%s': %ux%ux%u, %u levels, %u layers, format %d, %llu MB (images now %lld MB)", d.name ? d.name : "?", d.width, d.height, d.depth,
+                    d.mip_levels, d.array_layers, static_cast<int>(d.format), static_cast<unsigned long long>(inf.size >> 20),
+                    static_cast<long long>(vk_gauge_image_bytes().get() >> 20));
         if (inf.size >= (256ull << 20))
             NXLOG_I(kTag, "large image '%s': %ux%ux%u, %u levels, %u layers, format %d, %llu MB", d.name ? d.name : "?", d.width, d.height, d.depth,
                     d.mip_levels, d.array_layers, static_cast<int>(d.format), static_cast<unsigned long long>(inf.size >> 20));
@@ -888,7 +896,13 @@ VkResult Device::create_image(const ImageDesc& d, Image* out, std::string* why) 
 
 void Device::destroy_image(Image& img) {
     if (img.view) { vkDestroyImageView(device_, img.view, nullptr); vk_gauge_image_views().sub(1); }
-    if (img.image) { vmaDestroyImage(vma_, img.image, img.allocation); vk_gauge_images().sub(1); }
+    if (img.image) {
+        VmaAllocationInfo inf{};
+        vmaGetAllocationInfo(vma_, img.allocation, &inf);
+        vk_gauge_image_bytes().sub(static_cast<int64_t>(inf.size));
+        vmaDestroyImage(vma_, img.image, img.allocation);
+        vk_gauge_images().sub(1);
+    }
     img = Image{};
 }
 
@@ -907,6 +921,7 @@ VkResult Device::create_buffer(VkDeviceSize size, VkBufferUsageFlags usage, Memo
     VkResult r = vmaCreateBuffer(vma_, &bi, &ai, &b.buffer, &b.allocation, &info);
     if (r != VK_SUCCESS) return r;
     vk_gauge_buffers().add(1);
+    vk_gauge_buffer_bytes().add(static_cast<int64_t>(info.size));
     if (use == MemoryUse::Upload || use == MemoryUse::Readback) {      // S34: where host-visible buffers live (device-local host-visible = resizable BAR, else system memory)
         static std::atomic<int> logged{0};
         VkMemoryPropertyFlags mp = 0;
@@ -930,7 +945,13 @@ VkResult Device::create_buffer(VkDeviceSize size, VkBufferUsageFlags usage, Memo
 }
 
 void Device::destroy_buffer(Buffer& b) {
-    if (b.buffer) { vmaDestroyBuffer(vma_, b.buffer, b.allocation); vk_gauge_buffers().sub(1); }
+    if (b.buffer) {
+        VmaAllocationInfo inf{};
+        vmaGetAllocationInfo(vma_, b.allocation, &inf);
+        vk_gauge_buffer_bytes().sub(static_cast<int64_t>(inf.size));
+        vmaDestroyBuffer(vma_, b.buffer, b.allocation);
+        vk_gauge_buffers().sub(1);
+    }
     b = Buffer{};
 }
 

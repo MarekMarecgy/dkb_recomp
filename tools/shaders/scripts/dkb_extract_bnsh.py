@@ -91,9 +91,48 @@ def extract_bahs(d, found, stats, source):
             found[h] = (names[stage] if stage < 6 else "stage%d" % stage, code, ctrl, source)
 
 
+def extract_ndsr(d, found, stats, source):
+    """agl's NDSR pack (agl_ndsr.pck, the upscaler). Layout as documented by nxnative's shader_split.py (MIT; read, not copied): 16-byte records from +0x10 (or +0x14)
+    up to a zero one: u32 control offset, u32 control length << 4 | type, u32 code offset, u32 code length / 16 << 8 | type. A record is a shader when its first word
+    points at an NVN2 control section; the code length is control +0x44 and the stage u16 +0x56, as for BAHS."""
+    names = ["vertex", "fragment", "geometry", "hull", "domain", "compute"]
+
+    def is_ctl(o):
+        return o + 0x58 <= len(d) and struct.unpack_from("<I", d, o)[0] == 0x98761234
+
+    def score(o):
+        return sum(1 for c, _, _, _ in struct.iter_unpack("<4I", d[o:o + 256]) if is_ctl(c))
+    o = max((0x10, 0x14), key=score)
+    while o + 16 <= len(d):
+        c, cl, k, _ = struct.unpack_from("<4I", d, o)
+        o += 16
+        if not c and not cl:
+            break
+        if not is_ctl(c):
+            continue
+        clen = max(cl >> 4, 0x48)
+        ksize = struct.unpack_from("<I", d, c + 0x44)[0]
+        if ksize == 0 or k + ksize > len(d) or c + clen > len(d):
+            stats["bad_ndsr_entry"] = stats.get("bad_ndsr_entry", 0) + 1
+            continue
+        stage = struct.unpack_from("<H", d, c + 0x56)[0]
+        code, ctrl = d[k:k + ksize], d[c:c + clen]
+        h = hashlib.sha1(code).hexdigest()[:16]
+        stats["ndsr_stages"] = stats.get("ndsr_stages", 0) + 1
+        if h not in found:
+            found[h] = (names[stage] if stage < 6 else "stage%d" % stage, code, ctrl, source)
+
+
 def scan_container(d, found, stats, source):
     """BNSH programs plus any BAHS (agl sharcb) blocks embedded in a decompressed file (SARC members are stored uncompressed)."""
     extract(d, found, stats, source)
+    pos = 0
+    while True:
+        pos = d.find(b"NDSR", pos)
+        if pos < 0:
+            break
+        extract_ndsr(d[pos:], found, stats, source)
+        pos += 4
     pos = 0
     while True:
         pos = d.find(BAHS_V11, pos)

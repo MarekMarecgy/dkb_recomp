@@ -14,6 +14,7 @@
 #include <mutex>
 #include <set>
 #include <cstring>
+#include <map>
 #include <string>
 
 #include "nvn_core.h"
@@ -175,6 +176,50 @@ NVNboolean nvnProgramSetShadersExt(NVNprogram* program, int count, const ShaderD
     return nvnProgramSetShaders(program, count, plain);
 }
 
+// NVN2 program builder (nvn2_procs.tsv): SetShaders(builder, count, entries) keeps the stages the game lists on its stack, InitializeFromBuilder(program,
+// builder) then initialises the program with them. The entries are plain 16-byte NVNshaderData pairs (as nxnative's hle_nvn.c, MIT, reads them). The builder is a guest
+// object whose layout is not needed: its stages are kept here by address. The other builder setters (sample shading, ray tracing, subroutines) are not modelled.
+struct BuilderStages {
+    int count = 0;
+    NVNshaderData entries[6]{};
+};
+std::mutex g_builder_mu;
+std::map<uint64_t, BuilderStages> g_builders;
+
+void nvnProgramBuilderSetDefaults(void* builder) {
+    std::lock_guard<std::mutex> lk(g_builder_mu);
+    g_builders.erase(reinterpret_cast<uint64_t>(builder));
+}
+
+void nvnProgramBuilderSetDevice(void* builder, uint64_t device) {
+    (void)builder;
+    (void)device;
+}
+
+void nvnProgramBuilderSetShaders(void* builder, int count, uint64_t shaders) {
+    BuilderStages st;
+    if (count < 0 || count > 6 || (count > 0 && !shaders)) {
+        NXLOG_W("nvn", "nvnProgramBuilderSetShaders: %d stages (at most 6)", count);
+    } else {
+        st.count = count;
+        for (int k = 0; k < count; ++k) st.entries[k] = reinterpret_cast<const NVNshaderData*>(shaders)[k];
+    }
+    std::lock_guard<std::mutex> lk(g_builder_mu);
+    g_builders[reinterpret_cast<uint64_t>(builder)] = st;
+}
+
+int nvnProgramInitializeFromBuilder(NVNprogram* program, uint64_t builder) {
+    if (!nvnProgramInitialize(program, nullptr)) return 0;
+    BuilderStages st;
+    {
+        std::lock_guard<std::mutex> lk(g_builder_mu);
+        const auto it = g_builders.find(builder);
+        if (it != g_builders.end()) st = it->second;
+    }
+    if (st.count == 0) return 1;
+    return nvnProgramSetShaders(program, st.count, st.entries) ? 1 : 0;
+}
+
 NVNboolean nvnProgramSetSubroutineLinkage(NVNprogram* program, int stage, const NVNsubroutineLinkageMapPtr* map) {
     (void)stage;
     (void)map;
@@ -207,6 +252,10 @@ void register_api_program() {
     NVN_REG(nvnProgramSetShadersExt);
     NVN_REG(nvnProgramSetSubroutineLinkage);
     NVN_REG(nvnProgramSetSampleShading);
+    NVN2_REG(nvnProgramBuilderSetDefaults);
+    NVN2_REG(nvnProgramBuilderSetDevice);
+    NVN2_REG(nvnProgramBuilderSetShaders);
+    NVN2_REG(nvnProgramInitializeFromBuilder);
 }
 
 }  // namespace nxrt::nvn

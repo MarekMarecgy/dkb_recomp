@@ -9,7 +9,12 @@ Get-Process dkb -ErrorAction SilentlyContinue | Stop-Process -Force
 $env:NXRT_FS_ROMFS = "$Dump/romfs"                                   # read in place, never copied
 $env:NXRT_NVN_SHADER_CACHE = Join-Path $root 'work/shaders/dkb_spirv_full'   # translated shaders (tools/shaders/scripts/dkb_extract_bnsh.py + spirv_harness)
 if (-not (Test-Path "$env:NXRT_NVN_SHADER_CACHE/results.tsv")) { throw "shader cache missing: $env:NXRT_NVN_SHADER_CACHE" }
+if (-not $env:NXRT_NVN_SKIP_GS_HASHES) { $env:NXRT_NVN_SKIP_GS_HASHES = '498d2702' }   # this geometry shader loses the GPU (nvlddmkm 153); see docs/BUILD.md
+$env:NXRT_DIAG_SOAK_CSV = 'dkb_soak.jsonl'                                 # gauge sampler: vma.device_usage_mb, vk.memory_bytes, ... one JSON line per interval
+$env:NXRT_DIAG_SOAK_INTERVAL_S = '2'
+Remove-Item dkb_soak.jsonl -ErrorAction SilentlyContinue
 Remove-Item controls.ini -ErrorAction SilentlyContinue                      # rewritten from dkb_defaults.cpp
 $exe = @('--exefs', "$Dump/exefs", '--no-pads')
 if ($Headless) { $exe += @('--max-seconds', '60', '--screenshot-at', '20,45') } else { $exe += '--window' }
+if ($env:DKB_SHOTS) { $exe += @('--screenshot-at', $env:DKB_SHOTS) }                      # e.g. '70,85' (seconds): screenshots of the window run
 & .\dkb.exe @exe

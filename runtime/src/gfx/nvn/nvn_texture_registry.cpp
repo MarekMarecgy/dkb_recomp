@@ -223,8 +223,21 @@ void texture_registry_detach_gpu() {
 }
 
 Ref<Texture> texture_registry_find_alias(const Texture* t) {
-    if (!t || !t->mem || t->is_display) return Ref<Texture>();
+    if (!t || t->is_display) return Ref<Texture>();
     std::lock_guard<std::mutex> lk(g_mu);
+    if (!t->mem) {   // a texture placed in a virtual pool: the same pool offset and shape is the same storage (DKB places a new depth map there every frame)
+        if (!t->vpool) return Ref<Texture>();
+        for (Texture* o : g_virtual) {
+            if (o == t || o->destroyed.load() || !o->gpu || o->vpool.get() != t->vpool.get() || o->voffset != t->voffset) continue;
+            if (o->storage_size != t->storage_size || o->levels != t->levels || o->layers != t->layers || o->fmt != t->fmt || o->block_linear != t->block_linear ||
+                o->block_height_gobs != t->block_height_gobs || o->b.target != t->b.target || o->b.width != t->b.width || o->b.height != t->b.height ||
+                o->b.depth != t->b.depth || o->b.samples != t->b.samples)
+                continue;
+            o->ref();
+            return Ref<Texture>(o);
+        }
+        return Ref<Texture>();
+    }
     auto r = g_by_start.equal_range(reinterpret_cast<uint64_t>(t->mem));
     for (auto it = r.first; it != r.second; ++it) {
         Texture* o = it->second;
